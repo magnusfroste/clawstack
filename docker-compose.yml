@@ -1,0 +1,43 @@
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - CADDY_EMAIL=${CADDY_EMAIL}
+      - BASE_DOMAIN=${BASE_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - clawstack
+
+  portal:
+    build: ./portal
+    restart: unless-stopped
+    environment:
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASS=${ADMIN_PASS}
+      - BASE_DOMAIN=${BASE_DOMAIN}
+      - OPENCLAW_IMAGE=${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.3.24}
+      - TZ=${TZ:-Europe/Stockholm}
+      - INSTANCES_HOST_DIR=/opt/clawstack/instances
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portal_data:/data
+      - /opt/clawstack/instances:/instances
+    networks:
+      - clawstack
+
+volumes:
+  caddy_data:
+  caddy_config:
+  portal_data:
+
+networks:
+  clawstack:
+    name: clawstack
