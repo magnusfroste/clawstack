@@ -34,23 +34,25 @@ db.exec(`
 
 // --- Reverse proxy: MUST be first — routes customer domains before any admin middleware ---
 const proxyCache = {};
-function getProxy(containerName) {
-  if (!proxyCache[containerName]) {
-    proxyCache[containerName] = createProxyMiddleware({
-      target: `http://${containerName}:18789`,
+function getProxy(containerName, port = 18789) {
+  const key = `${containerName}:${port}`;
+  if (!proxyCache[key]) {
+    proxyCache[key] = createProxyMiddleware({
+      target: `http://${containerName}:${port}`,
       changeOrigin: false,
-      ws: true,
     });
   }
-  return proxyCache[containerName];
+  return proxyCache[key];
 }
 
 app.use((req, res, next) => {
   const host = req.hostname;
   if (!host || host === BASE_DOMAIN) return next();
   const row = db.prepare('SELECT container_name FROM instances WHERE domain = ?').get(host);
-  if (!row) return res.status(404).send('Not found');
-  getProxy(row.container_name)(req, res, next);
+  if (!row) return next(); // unknown host — let normal routes handle it (e.g. Caddy's internal /api/verify-domain call)
+  // A2A traffic goes to port 18800, everything else to 18789
+  const isA2A = req.path.startsWith('/a2a/') || req.path === '/.well-known/agent.json';
+  getProxy(row.container_name, isA2A ? 18800 : 18789)(req, res, next);
 });
 
 app.use(express.json());
@@ -78,7 +80,7 @@ const PROVIDER_CONFIGS = {
 };
 
 // --- Bootstrap: write OpenClaw config files before container starts ---
-function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl }) {
+function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl, enableA2A }) {
   const configDir = path.join(INSTANCES_DIR, name, 'config');
   const agentDir = path.join(configDir, 'agents', 'main', 'agent');
   const sessionsDir = path.join(configDir, 'agents', 'main', 'sessions');
@@ -136,6 +138,20 @@ function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseU
         dangerouslyDisableDeviceAuth: true
       }
     },
+    ...(enableA2A ? {
+      plugins: {
+        entries: {
+          'a2a-gateway': {
+            enabled: true,
+            config: {
+              server: { host: '0.0.0.0' },
+              agentCard: { url: `https://${domain}/a2a/jsonrpc` },
+              routing: { defaultAgentId: 'main' },
+            }
+          }
+        }
+      }
+    } : {}),
   }, null, 2));
 }
 
@@ -150,11 +166,18 @@ app.get('/api/verify-domain', (req, res) => {
 // --- API ---
 app.get('/api/instances', requireAdmin, (req, res) => {
   const rows = db.prepare('SELECT id, name, domain, container_name, provider, model, status, created_at FROM instances ORDER BY created_at DESC').all();
+  rows.forEach(row => {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(INSTANCES_DIR, row.name, 'config', 'openclaw.json'), 'utf8'));
+      const agents = cfg?.agents?.defaults?.model?.primary || cfg?.agents?.list?.[0]?.model;
+      row.liveModel = agents || null;
+    } catch { row.liveModel = null; }
+  });
   res.json(rows);
 });
 
 app.post('/api/instances', requireAdmin, async (req, res) => {
-  const { name, domain, provider, model, baseUrl } = req.body;
+  const { name, domain, provider, model, baseUrl, enableA2A } = req.body;
   const apiKey = NO_KEY_PROVIDERS.has(provider) ? (req.body.apiKey || 'none') : req.body.apiKey;
   if (!name || !domain || !provider || !model || (!NO_KEY_PROVIDERS.has(provider) && !apiKey))
     return res.status(400).json({ error: 'name, domain, provider, model required (and apiKey for this provider)' });
@@ -171,7 +194,7 @@ app.post('/api/instances', requireAdmin, async (req, res) => {
   }
 
   try {
-    bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl });
+    bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl, enableA2A: !!enableA2A });
   } catch (e) {
     db.prepare('DELETE FROM instances WHERE name = ?').run(name);
     return res.status(500).json({ error: `Bootstrap failed: ${e.message}` });
@@ -236,6 +259,7 @@ app.get('/api/instances/:name/files', requireAdmin, (req, res) => {
     const stat = fs.statSync(full);
     if (stat.isDirectory()) {
       const entries = fs.readdirSync(full, { withFileTypes: true })
+        .filter(e => !e.name.includes('.clobbered.'))
         .map(e => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file', size: e.isFile() ? fs.statSync(path.join(full, e.name)).size : 0 }))
         .sort((a, b) => a.type !== b.type ? (a.type === 'dir' ? -1 : 1) : a.name.localeCompare(b.name));
       return res.json({ type: 'dir', entries });
@@ -341,6 +365,44 @@ app.post('/api/instances/:name/exec', requireAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- CLI API (runs as node/uid 1000 — for openclaw CLI commands) ---
+app.post('/api/instances/:name/cli', requireAdmin, async (req, res) => {
+  const row = db.prepare('SELECT container_name FROM instances WHERE name = ?').get(req.params.name);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  const { cmd } = req.body;
+  if (!cmd || typeof cmd !== 'string') return res.status(400).json({ error: 'cmd required' });
+  try {
+    const container = docker.getContainer(row.container_name);
+    const exec = await container.exec({
+      Cmd: ['sh', '-c', cmd],
+      AttachStdout: true,
+      AttachStderr: true,
+      User: 'node',
+      Env: ['HOME=/home/node'],
+    });
+    const stream = await exec.start({ hijack: true, stdin: false });
+    const chunks = [];
+    await new Promise((resolve, reject) => {
+      stream.on('data', d => chunks.push(d));
+      stream.on('end', resolve);
+      stream.on('error', reject);
+      setTimeout(resolve, 60000); // 60s — installs can take a while
+    });
+    const buf = Buffer.concat(chunks);
+    let offset = 0, lines = [];
+    while (offset + 8 <= buf.length) {
+      const size = buf.readUInt32BE(offset + 4);
+      offset += 8;
+      if (offset + size > buf.length) break;
+      lines.push(buf.slice(offset, offset + size).toString('utf8'));
+      offset += size;
+    }
+    const output = lines.join('') || buf.toString('utf8');
+    const inspect = await exec.inspect();
+    res.json({ output, exitCode: inspect.ExitCode });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // --- Status API ---
 app.get('/api/instances/:name/status', requireAdmin, async (req, res) => {
   const row = db.prepare('SELECT container_name FROM instances WHERE name = ?').get(req.params.name);
@@ -371,6 +433,7 @@ const NO_KEY_PROVIDERS = new Set(['private']);
 app.get('/', requireAdmin, (req, res) => {
   const instances = db.prepare('SELECT * FROM instances ORDER BY created_at DESC').all();
   const authHeader = JSON.stringify(req.headers.authorization || '');
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -378,171 +441,285 @@ app.get('/', requireAdmin, (req, res) => {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
+    :root{
+      --bg:#09090b;--surface:#18181b;--surface2:#1f1f23;--border:#27272a;--border2:#3f3f46;
+      --text:#fafafa;--text2:#a1a1aa;--text3:#52525b;
+      --blue:#3b82f6;--blue-dim:#1d4ed8;--blue-bg:rgba(59,130,246,.08);
+      --green:#22c55e;--green-bg:rgba(34,197,94,.1);
+      --red:#ef4444;--red-bg:rgba(239,68,68,.1);
+      --amber:#f59e0b;--amber-bg:rgba(245,158,11,.1);
+      --radius:8px;--radius-sm:5px;
+    }
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:system-ui,sans-serif;background:#0f0f0f;color:#e5e5e5;padding:2rem;max-width:1000px;margin:0 auto}
-    h1{font-size:1.4rem;margin-bottom:1.75rem;color:#fff}
-    h2{font-size:0.78rem;color:#555;font-weight:500;margin-bottom:1rem;text-transform:uppercase;letter-spacing:.06em}
-    .card{background:#161616;border:1px solid #252525;border-radius:8px;padding:1.4rem;margin-bottom:1rem}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:0.7rem}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+    /* ── Layout ── */
+    .page{max-width:960px;margin:0 auto;padding:2.5rem 1.5rem}
+    /* ── Header ── */
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:2.5rem}
+    .logo{display:flex;align-items:center;gap:10px}
+    .logo-mark{width:32px;height:32px;background:var(--blue);border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+    .logo-text{font-size:1.1rem;font-weight:600;color:var(--text);letter-spacing:-.02em}
+    .logo-sub{font-size:0.75rem;color:var(--text3);margin-top:1px}
+    /* ── Section ── */
+    .section{margin-bottom:1.5rem}
+    .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem}
+    .section-title{font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.08em}
+    /* ── Card ── */
+    .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem}
+    /* ── Form ── */
+    .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem}
     .full{grid-column:1/-1}
-    label{display:block;font-size:0.78rem;color:#777;margin-bottom:3px}
-    input,select{width:100%;background:#0f0f0f;border:1px solid #2e2e2e;color:#e5e5e5;padding:7px 11px;border-radius:5px;font-size:0.88rem}
-    select option{background:#111}
-    .btn{display:inline-flex;align-items:center;gap:5px;border:none;border-radius:5px;cursor:pointer;font-size:0.82rem;padding:5px 12px;color:#fff;background:#2563eb}
-    .btn:disabled{opacity:.35;cursor:default}
-    .btn.sm{padding:3px 9px;font-size:0.76rem}
-    .btn.danger{background:#b91c1c}
-    .btn.ghost{background:#252525;color:#aaa}
-    .btn.amber{background:#b45309}
-    .btn.green{background:#15803d}
-    .btn.primary{background:#2563eb;padding:7px 16px;font-size:0.88rem}
-    table{width:100%;border-collapse:collapse}
-    th,td{text-align:left;padding:9px 11px;border-bottom:1px solid #1e1e1e;font-size:0.86rem;vertical-align:middle}
-    th{color:#444;font-weight:500;font-size:0.74rem;text-transform:uppercase;letter-spacing:.05em}
-    .badge{display:inline-block;padding:1px 8px;border-radius:99px;font-size:0.72rem;font-weight:500}
-    .badge.running{background:#14532d;color:#4ade80}
-    .badge.stopped{background:#1c1917;color:#78716c}
-    .badge.error{background:#450a0a;color:#f87171}
-    .badge.starting{background:#1c1917;color:#a8a29e}
-    a{color:#60a5fa;text-decoration:none}
-    .copy-btn{background:none;border:none;cursor:pointer;color:#444;padding:2px 5px;border-radius:3px;font-size:0.75rem}
-    .copy-btn:hover{color:#93c5fd;background:#1a1a1a}
-    .actions{display:flex;gap:5px;align-items:center}
-    /* Modal */
-    #mgr{display:none;position:fixed;inset:0;z-index:999;flex-direction:column;background:#0a0a0a}
+    .field label{display:block;font-size:0.72rem;font-weight:500;color:var(--text3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em}
+    input,select{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 11px;border-radius:var(--radius-sm);font-size:0.875rem;outline:none;transition:border-color .15s}
+    input:focus,select:focus{border-color:var(--blue)}
+    select option{background:var(--surface)}
+    input::placeholder{color:var(--text3)}
+    /* ── Buttons ── */
+    .btn{display:inline-flex;align-items:center;gap:5px;border:none;border-radius:var(--radius-sm);cursor:pointer;font-size:0.8rem;font-weight:500;padding:6px 14px;color:#fff;background:var(--blue);transition:opacity .15s,background .15s;white-space:nowrap}
+    .btn:hover{opacity:.85}
+    .btn:disabled{opacity:.3;cursor:default}
+    .btn.sm{padding:4px 10px;font-size:0.74rem;border-radius:4px}
+    .btn.xs{padding:2px 7px;font-size:0.7rem;border-radius:4px}
+    .btn.ghost{background:var(--surface2);color:var(--text2);border:1px solid var(--border)}
+    .btn.ghost:hover{background:var(--border);opacity:1}
+    .btn.danger{background:var(--red-bg);color:var(--red);border:1px solid rgba(239,68,68,.2)}
+    .btn.danger:hover{background:var(--red);color:#fff;opacity:1}
+    .btn.amber{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,158,11,.2)}
+    .btn.amber:hover{background:var(--amber);color:#fff;opacity:1}
+    .btn.green{background:var(--green-bg);color:var(--green);border:1px solid rgba(34,197,94,.2)}
+    .btn.green:hover{background:var(--green);color:#fff;opacity:1}
+    .btn.primary{background:var(--blue);border:none;padding:8px 18px;font-size:0.875rem}
+    /* ── Badge ── */
+    .badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:99px;font-size:0.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+    .badge::before{content:'';width:5px;height:5px;border-radius:50%;flex-shrink:0}
+    .badge.running{background:var(--green-bg);color:var(--green)}.badge.running::before{background:var(--green)}
+    .badge.stopped{background:var(--surface2);color:var(--text3)}.badge.stopped::before{background:var(--text3)}
+    .badge.error{background:var(--red-bg);color:var(--red)}.badge.error::before{background:var(--red)}
+    .badge.starting{background:var(--amber-bg);color:var(--amber)}.badge.starting::before{background:var(--amber)}
+    /* ── Instance cards ── */
+    .instances{display:flex;flex-direction:column;gap:0.5rem}
+    .inst-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.25rem;display:flex;align-items:center;gap:1rem;transition:border-color .15s}
+    .inst-card:hover{border-color:var(--border2)}
+    .inst-main{flex:1;min-width:0}
+    .inst-name{font-size:0.925rem;font-weight:600;color:var(--text);display:flex;align-items:center;gap:8px}
+    .inst-meta{font-size:0.72rem;color:var(--text3);margin-top:3px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .inst-domain{font-size:0.8rem;color:var(--blue);text-decoration:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .inst-domain:hover{text-decoration:underline}
+    .inst-token{display:flex;align-items:center;gap:4px}
+    .tok-val{font-size:0.68rem;color:var(--text3);font-family:monospace;cursor:pointer;transition:color .15s}
+    .tok-val:hover{color:var(--text2)}
+    .copy-btn{background:none;border:none;cursor:pointer;color:var(--text3);padding:2px 4px;border-radius:3px;font-size:0.75rem;line-height:1;transition:color .15s}
+    .copy-btn:hover{color:var(--blue)}
+    .inst-actions{display:flex;gap:5px;align-items:center;flex-shrink:0}
+    .divider{width:1px;height:18px;background:var(--border);flex-shrink:0}
+    /* ── Links ── */
+    a{color:var(--blue);text-decoration:none}
+    /* ── CNAME notice ── */
+    .cname-notice{margin-top:6px;padding:7px 11px;background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);border-radius:var(--radius-sm);font-size:0.75rem;color:var(--amber);line-height:1.5;display:none}
+    .cname-notice code{color:#fcd34d;background:rgba(0,0,0,.3);padding:1px 5px;border-radius:3px;font-size:0.72rem}
+    /* ── Empty state ── */
+    .empty{padding:2.5rem;text-align:center;color:var(--text3);font-size:0.875rem;border:1px dashed var(--border);border-radius:var(--radius)}
+    /* ══ Manager modal ══ */
+    #mgr{display:none;position:fixed;inset:0;z-index:999;flex-direction:column;background:var(--bg)}
     #mgr.open{display:flex}
-    #mgr-bar{display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid #1a1a1a;background:#111;flex-shrink:0}
-    #mgr-tabs{display:flex;gap:0;border-bottom:1px solid #1a1a1a;flex-shrink:0;background:#111}
-    .tab{padding:6px 18px;font-size:0.8rem;cursor:pointer;color:#555;border-bottom:2px solid transparent}
-    .tab.active{color:#93c5fd;border-bottom-color:#2563eb}
+    #mgr-bar{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0;min-height:49px}
+    #mgr-bar .back{font-size:0.78rem;color:var(--text3);cursor:pointer;display:flex;align-items:center;gap:4px;padding:4px 8px;border-radius:4px;border:none;background:none;transition:color .15s}
+    #mgr-bar .back:hover{color:var(--text)}
+    #mgr-bar .inst-label{font-size:0.875rem;font-weight:600;color:var(--text)}
+    #mgr-bar .spacer{flex:1}
+    #mgr-bar .bar-actions{display:flex;gap:5px;align-items:center}
+    #mgr-action-status{font-size:0.72rem;color:var(--text3);min-width:50px;text-align:right}
+    #mgr-tabs{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surface);padding:0 8px}
+    .tab{padding:8px 14px;font-size:0.78rem;font-weight:500;cursor:pointer;color:var(--text3);border-bottom:2px solid transparent;transition:color .15s;user-select:none}
+    .tab:hover{color:var(--text2)}
+    .tab.active{color:var(--blue);border-bottom-color:var(--blue)}
     #mgr-body{display:flex;flex:1;overflow:hidden}
-    #mgr-tree{width:250px;flex-shrink:0;overflow-y:auto;border-right:1px solid #161616;font-size:0.78rem;font-family:monospace;padding:4px 0}
+    #mgr-tree{width:240px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border);font-size:0.76rem;font-family:monospace;padding:6px 0;background:var(--surface)}
     #mgr-right{flex:1;display:flex;flex-direction:column;overflow:hidden}
-    #mgr-crumb{padding:4px 14px;font-size:0.72rem;color:#3a3a3a;font-family:monospace;background:#0e0e0e;border-bottom:1px solid #161616;flex-shrink:0}
-    #mgr-editor{flex:1;background:#0a0a0a;color:#c9d1d9;border:none;outline:none;resize:none;padding:14px 18px;font-family:'Fira Code',Consolas,monospace;font-size:13px;line-height:1.65;tab-size:2}
-    #mgr-logs{flex:1;background:#0a0a0a;color:#7d8590;overflow-y:auto;padding:12px 16px;font-family:monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;display:none}
-    #mgr-exec{flex:1;display:none;flex-direction:column;overflow:hidden}
-    #exec-output{flex:1;background:#0a0a0a;color:#7d8590;overflow-y:auto;padding:12px 16px;font-family:monospace;font-size:12px;line-height:1.5;white-space:pre-wrap}
-    #exec-input-row{display:flex;gap:6px;padding:7px 14px;border-top:1px solid #161616;background:#0e0e0e;flex-shrink:0}
-    #exec-cmd{flex:1;background:#0f0f0f;border:1px solid #2e2e2e;color:#e5e5e5;padding:6px 10px;border-radius:5px;font-size:0.85rem;font-family:monospace}
-    #exec-run{background:#15803d;border:none;color:#fff;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:0.82rem}
-    #exec-run:disabled{opacity:.4;cursor:default}
-    #mgr-footer{display:flex;align-items:center;gap:8px;padding:7px 14px;border-top:1px solid #161616;background:#0e0e0e;flex-shrink:0}
-    .tree-row{display:flex;align-items:center;padding:2px 8px;cursor:pointer;border-radius:3px;user-select:none;gap:5px}
-    .tree-row:hover{background:#161616}
-    .tree-row.active{background:#1e3448;color:#93c5fd}
-    .tree-arrow{font-size:8px;color:#3a3a3a;transition:transform .12s;flex-shrink:0}
+    #mgr-crumb{padding:5px 16px;font-size:0.7rem;color:var(--text3);font-family:monospace;background:var(--surface2);border-bottom:1px solid var(--border);flex-shrink:0}
+    #mgr-editor{flex:1;background:var(--bg);color:#c9d1d9;border:none;outline:none;resize:none;padding:16px 20px;font-family:'Fira Code',Consolas,monospace;font-size:13px;line-height:1.7;tab-size:2}
+    #mgr-logs{flex:1;background:var(--bg);color:var(--text3);overflow-y:auto;padding:14px 18px;font-family:monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;display:none}
+    #mgr-footer{display:flex;align-items:center;gap:8px;padding:8px 16px;border-top:1px solid var(--border);background:var(--surface);flex-shrink:0}
+    #mgr-status{font-size:0.75rem;color:var(--text3)}
+    /* ── Terminal panels (CLI + Exec) ── */
+    .term-panel{flex:1;display:none;flex-direction:column;overflow:hidden}
+    .term-output{flex:1;background:var(--bg);overflow-y:auto;padding:14px 18px;font-family:monospace;font-size:12px;line-height:1.6;white-space:pre-wrap}
+    .term-hints{display:flex;flex-wrap:wrap;gap:5px;padding:8px 16px;background:var(--surface2);border-bottom:1px solid var(--border);flex-shrink:0}
+    .term-hints button{background:none;border:1px solid var(--border);color:var(--text3);padding:2px 8px;border-radius:4px;font-size:0.7rem;cursor:pointer;font-family:monospace;transition:all .12s}
+    .term-hints button:hover{border-color:var(--border2);color:var(--text)}
+    .term-input-row{display:flex;gap:8px;padding:8px 16px;border-top:1px solid var(--border);background:var(--surface);flex-shrink:0;align-items:center}
+    .term-prefix{font-family:monospace;font-size:0.82rem;flex-shrink:0;opacity:.6}
+    .term-cmd{flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 11px;border-radius:var(--radius-sm);font-size:0.82rem;font-family:monospace;outline:none;transition:border-color .15s}
+    .term-cmd:focus{border-color:var(--blue)}
+    .term-run{background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:6px 14px;border-radius:var(--radius-sm);cursor:pointer;font-size:0.78rem;font-weight:500;transition:all .15s;flex-shrink:0}
+    .term-run:hover{background:var(--blue);border-color:var(--blue);color:#fff}
+    .term-run:disabled{opacity:.3;cursor:default}
+    #cli-output{color:#86efac}
+    #exec-output{color:var(--text3)}
+    /* ── File tree ── */
+    .tree-row{display:flex;align-items:center;padding:3px 10px;cursor:pointer;border-radius:0;user-select:none;gap:5px;transition:background .1s}
+    .tree-row:hover{background:var(--surface2)}
+    .tree-row.active{background:var(--blue-bg);color:var(--blue)}
+    .tree-arrow{font-size:7px;color:var(--text3);transition:transform .12s;flex-shrink:0}
     .tree-arrow.open{transform:rotate(90deg)}
-    .tree-icon{font-size:11px;flex-shrink:0}
-    .tree-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#777}
-    .tree-row:hover .tree-name{color:#ccc}
-    .tree-row.active .tree-name{color:#93c5fd}
+    .tree-icon{font-size:11px;flex-shrink:0;opacity:.7}
+    .tree-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2)}
+    .tree-row:hover .tree-name{color:var(--text)}
+    .tree-row.active .tree-name{color:var(--blue)}
     .tree-children{padding-left:14px;display:none}
     .tree-children.open{display:block}
   </style>
 </head>
 <body>
-  <h1>ClawStack</h1>
+<div class="page">
 
-  <div class="card">
-    <h2>New instance</h2>
-    <form method="post" action="/admin/instances">
-      <div class="grid">
-        <div><label>Name</label><input name="name" placeholder="acme" required></div>
-        <div>
-          <label>Domain</label>
-          <input name="domain" id="domain-input" placeholder="ai.acme.com" required oninput="onDomainInput(this)">
-          <div id="cname-notice" style="display:none;margin-top:5px;padding:6px 10px;background:#1a1200;border:1px solid #3d2e00;border-radius:4px;font-size:0.76rem;color:#ca8a04;line-height:1.4">
-            Set a CNAME record: <code id="cname-domain" style="color:#fbbf24;background:#111;padding:1px 5px;border-radius:3px"></code> → <code style="color:#fbbf24;background:#111;padding:1px 5px;border-radius:3px">${BASE_DOMAIN || 'this-server'}</code>
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">
+      <div class="logo-mark">🦞</div>
+      <div>
+        <div class="logo-text">ClawStack</div>
+        <div class="logo-sub">OpenClaw instance manager</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- New instance -->
+  <div class="section">
+    <div class="section-head"><span class="section-title">New instance</span></div>
+    <div class="card">
+      <form method="post" action="/admin/instances">
+        <div class="form-grid">
+          <div class="field"><label>Name</label><input name="name" placeholder="acme" required></div>
+          <div class="field">
+            <label>Domain</label>
+            <input name="domain" id="domain-input" placeholder="ai.acme.com" required oninput="onDomainInput(this)">
+            <div id="cname-notice" class="cname-notice">
+              Point DNS: <code id="cname-domain"></code> → <code>${BASE_DOMAIN || 'this-server'}</code> (CNAME)
+            </div>
+          </div>
+          <div class="field">
+            <label>Provider</label>
+            <select name="provider" id="provider" onchange="onProviderChange(this)">
+              ${PROVIDERS.map(p => `<option value="${p}">${p === 'private' ? 'Private LLM (self-hosted)' : p}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>Model</label><input name="model" id="model" value="${MODEL_PRESETS.openrouter}" required></div>
+          <div class="field full" id="baseurl-row" style="display:none"><label>Base URL</label><input name="baseUrl" id="baseUrl" type="url" placeholder="http://localhost:11434/v1" autocomplete="off"></div>
+          <div class="field full" id="apikey-row"><label>API Key</label><input name="apiKey" id="apiKey" type="password" placeholder="sk-..." autocomplete="off"></div>
+          <div class="full" style="margin-top:4px;display:flex;align-items:center;justify-content:space-between;gap:1rem">
+            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:0.78rem;color:var(--text3);text-transform:none;letter-spacing:0;font-weight:400">
+              <input type="checkbox" name="enableA2A" value="1" style="width:auto;accent-color:var(--blue)">
+              Enable A2A (agent-to-agent protocol)
+            </label>
+            <button type="submit" class="btn primary">Create instance</button>
           </div>
         </div>
-        <div>
-          <label>Provider</label>
-          <select name="provider" id="provider" onchange="onProviderChange(this)">
-            ${PROVIDERS.map(p => `<option value="${p}">${p === 'private' ? 'Private LLM (self-hosted)' : p}</option>`).join('')}
-          </select>
+      </form>
+    </div>
+  </div>
+
+  <!-- Instances -->
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Instances</span>
+      <span style="font-size:0.72rem;color:var(--text3)">${instances.length} total</span>
+    </div>
+    ${instances.length === 0
+      ? '<div class="empty">No instances yet. Create one above.</div>'
+      : `<div class="instances">${instances.map(i => `
+      <div class="inst-card">
+        <div class="inst-main">
+          <div class="inst-name">
+            ${esc(i.name)}
+            <span class="badge ${i.status}" id="badge-${i.name}">${i.status}</span>
+          </div>
+          ${i.liveModel ? `<div class="inst-meta">${esc(i.liveModel)}</div>` : ''}
         </div>
-        <div><label>Model</label><input name="model" id="model" value="${MODEL_PRESETS.openrouter}" required></div>
-        <div class="full" id="baseurl-row" style="display:none"><label>Base URL</label><input name="baseUrl" id="baseUrl" type="url" placeholder="http://localhost:11434/v1" autocomplete="off"></div>
-        <div class="full" id="apikey-row"><label>API Key</label><input name="apiKey" id="apiKey" type="password" placeholder="sk-... (optional for private)" autocomplete="off"></div>
-        <div class="full" style="margin-top:6px"><button type="submit" class="btn primary">Create instance</button></div>
-      </div>
-    </form>
+        <a class="inst-domain" href="https://${esc(i.domain)}" target="_blank">${esc(i.domain)}</a>
+        <div class="inst-token">
+          <span class="tok-val" id="tok-${i.name}" title="Click to copy" onclick="copyToken('${esc(i.token)}','${esc(i.name)}')">${i.token.slice(0,18)}…</span>
+          <button class="copy-btn" onclick="copyToken('${esc(i.token)}','${esc(i.name)}')" title="Copy token">⎘</button>
+        </div>
+        <div class="divider"></div>
+        <div class="inst-actions">
+          <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','files')">Files</button>
+          <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','logs')">Logs</button>
+          <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','cli')">CLI</button>
+          <div class="divider"></div>
+          <button class="btn amber sm" onclick="rowAction('${esc(i.name)}','restart')" title="Restart">↺</button>
+          <button class="btn ghost sm" id="stopstart-${i.name}" onclick="rowAction('${esc(i.name)}','${i.status === 'running' ? 'stop' : 'start'}')">${i.status === 'running' ? '■' : '▶'}</button>
+          <form method="post" action="/admin/instances/${esc(i.name)}/delete" style="margin:0">
+            <button type="submit" class="btn danger sm" onclick="return confirm('Delete ${esc(i.name)}?')">✕</button>
+          </form>
+        </div>
+      </div>`).join('')}</div>`}
   </div>
 
-  <div class="card">
-    <h2>Instances</h2>
-    ${instances.length === 0 ? '<p style="color:#444;font-size:0.88rem">No instances yet.</p>' : `
-    <table>
-      <thead><tr><th>Name</th><th>Domain</th><th>Token</th><th>Status</th><th>Created</th><th></th></tr></thead>
-      <tbody>
-        ${instances.map(i => `
-          <tr>
-            <td><strong style="color:#e2e8f0">${i.name}</strong><div style="font-size:0.72rem;color:#444;margin-top:2px">${i.provider} · ${i.model}</div></td>
-            <td><a href="https://${i.domain}" target="_blank">${i.domain}</a></td>
-            <td>
-              <div style="display:flex;align-items:center;gap:4px">
-                <code id="tok-${i.name}" style="font-size:0.7rem;color:#3a3a3a;cursor:pointer" title="Click to copy">${i.token.slice(0,20)}…</code>
-                <button class="copy-btn" onclick="copyToken('${i.token}','${i.name}')" title="Copy full token">⎘</button>
-              </div>
-            </td>
-            <td><span class="badge ${i.status}" id="badge-${i.name}">${i.status}</span></td>
-            <td style="color:#444;font-size:0.8rem">${new Date(i.created_at).toLocaleDateString()}</td>
-            <td>
-              <div class="actions">
-                <button class="btn ghost sm" onclick="openMgr('${i.name}','files')">Files</button>
-                <button class="btn ghost sm" onclick="openMgr('${i.name}','logs')">Logs</button>
-                <button class="btn amber sm" onclick="rowAction('${i.name}','restart')">↺</button>
-                <button class="btn ghost sm" id="stopstart-${i.name}" onclick="rowAction('${i.name}','${i.status === 'running' ? 'stop' : 'start'}')">${i.status === 'running' ? '■' : '▶'}</button>
-                <form method="post" action="/admin/instances/${i.name}/delete" style="margin:0">
-                  <button type="submit" class="btn danger sm" onclick="return confirm('Delete ${i.name}?')">✕</button>
-                </form>
-              </div>
-            </td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>`}
-  </div>
+</div><!-- /page -->
 
-  <!-- ===== Manager Modal ===== -->
-  <div id="mgr">
-    <div id="mgr-bar">
-      <button class="btn ghost sm" id="btn-close" onclick="closeMgr()">← Back</button>
-      <span id="mgr-title" style="font-weight:600;color:#e2e8f0;font-size:0.9rem"></span>
-      <span id="mgr-badge" class="badge" style="margin-left:4px"></span>
-      <div style="flex:1"></div>
+<!-- ══ Manager Modal ══ -->
+<div id="mgr">
+  <div id="mgr-bar">
+    <button class="back" onclick="closeMgr()">← Back</button>
+    <span class="inst-label" id="mgr-title"></span>
+    <span id="mgr-badge" class="badge" style="margin-left:2px"></span>
+    <div class="spacer"></div>
+    <div class="bar-actions">
       <button class="btn amber sm" onclick="mgrAction('restart')">Restart</button>
-      <button class="btn danger sm" id="btn-stop"  onclick="mgrAction('stop')">Stop</button>
-      <button class="btn green sm"  id="btn-start" onclick="mgrAction('start')">Start</button>
-      <span id="mgr-action-status" style="font-size:0.75rem;color:#555;min-width:60px;text-align:right"></span>
+      <button class="btn danger sm" onclick="mgrAction('stop')">Stop</button>
+      <button class="btn green sm"  onclick="mgrAction('start')">Start</button>
+      <span id="mgr-action-status"></span>
     </div>
-    <div id="mgr-tabs">
-      <div class="tab active" id="tab-files" onclick="switchTab('files')">Files</div>
-      <div class="tab"        id="tab-logs"  onclick="switchTab('logs')">Logs</div>
-      <div class="tab"        id="tab-exec"  onclick="switchTab('exec')">Exec (root)</div>
-    </div>
-    <div id="mgr-body">
-      <div id="mgr-tree"></div>
-      <div id="mgr-right">
-        <div id="mgr-crumb">—</div>
-        <textarea id="mgr-editor" spellcheck="false" placeholder="Select a file from the tree to edit it here…"></textarea>
-        <pre id="mgr-logs"></pre>
-        <div id="mgr-exec">
-          <div id="exec-output"># Root exec — runs as root inside the container\n# Use this to install packages, fix permissions, inspect the system, etc.\n</div>
-          <div id="exec-input-row">
-            <input id="exec-cmd" placeholder="e.g. apt-get install -y curl" autocomplete="off" spellcheck="false">
-            <button id="exec-run" onclick="runExec()">Run</button>
-          </div>
+  </div>
+  <div id="mgr-tabs">
+    <div class="tab active" id="tab-files" onclick="switchTab('files')">Files</div>
+    <div class="tab"        id="tab-logs"  onclick="switchTab('logs')">Logs</div>
+    <div class="tab"        id="tab-cli"   onclick="switchTab('cli')">CLI</div>
+    <div class="tab"        id="tab-exec"  onclick="switchTab('exec')">Exec (root)</div>
+  </div>
+  <div id="mgr-body">
+    <div id="mgr-tree"></div>
+    <div id="mgr-right">
+      <div id="mgr-crumb">—</div>
+      <textarea id="mgr-editor" spellcheck="false" placeholder="Select a file from the tree…"></textarea>
+      <pre id="mgr-logs"></pre>
+
+      <!-- CLI panel -->
+      <div id="mgr-cli" class="term-panel">
+        <div class="term-hints">
+          <button onclick="cliShortcut('openclaw plugins list')">plugins list</button>
+          <button onclick="cliShortcut('openclaw plugins install ')">plugins install …</button>
+          <button onclick="cliShortcut('openclaw config get')">config get</button>
+          <button onclick="cliShortcut('openclaw doctor')">doctor</button>
+          <button onclick="cliShortcut('openclaw --version')">version</button>
         </div>
-        <div id="mgr-footer">
-          <button id="btn-save" class="btn sm" onclick="saveFile()" disabled>Save</button>
-          <button id="btn-refresh-logs" class="btn ghost sm" style="display:none" onclick="loadLogs()">↻ Refresh</button>
-          <span id="mgr-status" style="font-size:0.78rem;color:#555"></span>
+        <div id="cli-output" class="term-output"># OpenClaw CLI — node user (uid 1000)\n</div>
+        <div class="term-input-row">
+          <span class="term-prefix" style="color:#86efac">$</span>
+          <input id="cli-cmd" class="term-cmd" placeholder="openclaw plugins install @openclaw/voice-call" autocomplete="off" spellcheck="false">
+          <button id="cli-run" class="term-run" onclick="runCli()">Run</button>
         </div>
+      </div>
+
+      <!-- Exec panel -->
+      <div id="mgr-exec" class="term-panel">
+        <div id="exec-output" class="term-output"># Root shell — docker exec --user root\n</div>
+        <div class="term-input-row">
+          <span class="term-prefix" style="color:#f87171">#</span>
+          <input id="exec-cmd" class="term-cmd" placeholder="apt-get install -y curl" autocomplete="off" spellcheck="false">
+          <button id="exec-run" class="term-run" onclick="runExec()">Run</button>
+        </div>
+      </div>
+
+      <div id="mgr-footer">
+        <button id="btn-save" class="btn sm" onclick="saveFile()" disabled>Save</button>
+        <button id="btn-refresh-logs" class="btn ghost sm" style="display:none" onclick="loadLogs()">↻ Refresh</button>
+        <span id="mgr-status"></span>
       </div>
     </div>
   </div>
+</div>
 
   <script>
     const presets   = ${JSON.stringify(MODEL_PRESETS)};
@@ -631,11 +808,10 @@ app.get('/', requireAdmin, (req, res) => {
 
     function switchTab(tab){
       mgrTab=tab;
-      document.getElementById('tab-files').className='tab'+(tab==='files'?' active':'');
-      document.getElementById('tab-logs').className='tab'+(tab==='logs'?' active':'');
-      document.getElementById('tab-exec').className='tab'+(tab==='exec'?' active':'');
+      ['files','logs','cli','exec'].forEach(t=>document.getElementById('tab-'+t).className='tab'+(tab===t?' active':''));
       document.getElementById('mgr-editor').style.display=tab==='files'?'':'none';
       document.getElementById('mgr-logs').style.display=tab==='logs'?'block':'none';
+      document.getElementById('mgr-cli').style.display=tab==='cli'?'flex':'none';
       document.getElementById('mgr-exec').style.display=tab==='exec'?'flex':'none';
       document.getElementById('btn-save').style.display=tab==='files'?'':'none';
       document.getElementById('btn-refresh-logs').style.display=tab==='logs'?'':'none';
@@ -646,6 +822,9 @@ app.get('/', requireAdmin, (req, res) => {
       } else if(tab==='logs'){
         document.getElementById('mgr-crumb').textContent='Container logs (last 300 lines)';
         loadLogs();
+      } else if(tab==='cli'){
+        document.getElementById('mgr-crumb').textContent='OpenClaw CLI (node user)';
+        setTimeout(()=>document.getElementById('cli-cmd').focus(),50);
       } else {
         document.getElementById('mgr-crumb').textContent='Root shell (docker exec --user root)';
       }
@@ -732,6 +911,46 @@ app.get('/', requireAdmin, (req, res) => {
       const d=await api('GET','/api/instances/'+mgrName+'/logs');
       el.textContent=d.error?('Error: '+d.error):(d.logs||'(no logs)');
       el.scrollTop=el.scrollHeight;
+    }
+
+    // ── CLI tab ──
+    const cliHistory=[];
+    let cliHistIdx=-1;
+    document.addEventListener('DOMContentLoaded',()=>{
+      document.getElementById('cli-cmd').addEventListener('keydown',e=>{
+        if(e.key==='Enter'){runCli();return;}
+        if(e.key==='ArrowUp'){e.preventDefault();if(cliHistIdx<cliHistory.length-1){cliHistIdx++;e.target.value=cliHistory[cliHistory.length-1-cliHistIdx]||'';}}
+        if(e.key==='ArrowDown'){e.preventDefault();if(cliHistIdx>0){cliHistIdx--;e.target.value=cliHistory[cliHistory.length-1-cliHistIdx]||'';}else{cliHistIdx=-1;e.target.value='';}}
+      });
+    });
+
+    function cliShortcut(cmd){
+      const inp=document.getElementById('cli-cmd');
+      inp.value=cmd;
+      inp.focus();
+      inp.setSelectionRange(cmd.length,cmd.length);
+    }
+
+    async function runCli(){
+      const inp=document.getElementById('cli-cmd');
+      const out=document.getElementById('cli-output');
+      const btn=document.getElementById('cli-run');
+      const cmd=inp.value.trim();
+      if(!cmd) return;
+      cliHistory.push(cmd); cliHistIdx=-1;
+      inp.value='';
+      btn.disabled=true;
+      out.textContent+='\\n$ '+cmd+'\\n';
+      out.scrollTop=out.scrollHeight;
+      const d=await api('POST','/api/instances/'+mgrName+'/cli',{cmd});
+      if(d.error){ out.textContent+='[error] '+d.error+'\\n'; }
+      else {
+        out.textContent+=(d.output||'(no output)');
+        if(d.exitCode!==0) out.textContent+='[exit '+d.exitCode+']\\n';
+      }
+      out.scrollTop=out.scrollHeight;
+      btn.disabled=false;
+      inp.focus();
     }
 
     // ── Exec tab ──
