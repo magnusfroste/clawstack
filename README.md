@@ -4,6 +4,8 @@ The internet was the first acceleration. Generative AI was the second. Agentic a
 
 [OpenClaw](https://openclaw.dev) puts a persistent, tool-using AI agent in the hands of anyone — browsing the web, writing code, managing files, and acting on your behalf around the clock. ClawStack is the missing infrastructure layer: spin up and host a swarm of OpenClaw instances (**ClawSwarm**) on your own hardware, each with its own domain, HTTPS, and full isolation. One server. Unlimited agents.
 
+Under the hood, ClawStack runs a smart reverse proxy (Caddy) that makes custom domains trivially easy. Each agent gets its own domain or subdomain — `ai.yourclient.com`, `jarvis.yourcompany.com`, whatever you like. Just point a CNAME at your ClawStack server and the proxy handles the rest: TLS certificates are issued automatically on first request, no configuration needed. No wildcard certs, no manual cert management, no nginx reloads.
+
 ## Prerequisites
 
 On a fresh VPS:
