@@ -1,6 +1,8 @@
 # ClawStack
 
-Self-host multiple [OpenClaw](https://openclaw.dev) instances with custom domains and automatic HTTPS.
+The internet was the first acceleration. Generative AI was the second. Agentic autonomy is the third.
+
+[OpenClaw](https://openclaw.dev) puts a persistent, tool-using AI agent in the hands of anyone — browsing the web, writing code, managing files, and acting on your behalf around the clock. ClawStack is the missing infrastructure layer: spin up and host a swarm of OpenClaw instances (**ClawSwarm**) on your own hardware, each with its own domain, HTTPS, and full isolation. One server. Unlimited agents.
 
 ## Prerequisites
 
