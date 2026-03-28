@@ -30,10 +30,11 @@ ai.customer.com  CNAME  clawstack.yourdomain.com
 ## Setup
 
 ```bash
-git clone https://github.com/yourusername/clawstack.git
+git clone https://github.com/magnusfroste/clawstack.git
 cd clawstack
 cp .env.example .env
 # Edit .env with your domain, email and admin password
+mkdir -p /opt/clawstack/instances
 docker compose up -d
 ```
 
