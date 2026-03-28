@@ -6,6 +6,8 @@ The internet was the first acceleration. Generative AI was the second. Agentic a
 
 Under the hood, ClawStack runs a smart reverse proxy (Caddy) that makes custom domains trivially easy. Each agent gets its own domain or subdomain — `ai.yourclient.com`, `jarvis.yourcompany.com`, whatever you like. Just point a CNAME at your ClawStack server and the proxy handles the rest: TLS certificates are issued automatically on first request, no configuration needed. No wildcard certs, no manual cert management, no nginx reloads.
 
+And because ClawStack pulls directly from the official OpenClaw image, you're always running the latest release — not a snapshot baked into a platform template two months ago. EasyPanel, Fly.io, Railway and friends are great, but their OpenClaw integrations lag behind. ClawStack is effectively a local installation with multi-container tenancy: full control, zero platform lag.
+
 ## Prerequisites
 
 On a fresh VPS:
