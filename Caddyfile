@@ -10,6 +10,11 @@
   reverse_proxy portal:3000
 }
 
+# Paperclip orchestrator
+boss.froste.eu {
+  reverse_proxy paperclip:3100
+}
+
 # Customer OpenClaw instances — on-demand TLS, portal routes traffic
 https:// {
   tls {
