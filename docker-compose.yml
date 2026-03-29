@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   caddy:
     image: caddy:2
@@ -15,6 +21,8 @@ services:
       - caddy_config:/config
     networks:
       - clawstack
+    mem_limit: 128m
+    logging: *default-logging
 
   portal:
     build: ./portal
@@ -32,11 +40,49 @@ services:
       - /opt/clawstack/instances:/instances
     networks:
       - clawstack
+    mem_limit: 256m
+    logging: *default-logging
+
+  paperclip:
+    image: reeoss/paperclipai-paperclip:latest
+    restart: unless-stopped
+    environment:
+      - BETTER_AUTH_SECRET=${PAPERCLIP_SECRETS_KEY}
+      - PAPERCLIP_PUBLIC_URL=https://boss.froste.eu
+      - DATABASE_URL=postgres://paperclip:paperclip@paperclip-db:5432/paperclip
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLAUDE_BASE_URL=${CLAUDE_BASE_URL:-}
+      - CLAUDE_AUTH_TOKEN=${CLAUDE_AUTH_TOKEN:-}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-}
+    volumes:
+      - paperclip_data:/paperclip
+    depends_on:
+      - paperclip-db
+    networks:
+      - clawstack
+    mem_limit: 512m
+    logging: *default-logging
+
+  paperclip-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=paperclip
+      - POSTGRES_PASSWORD=paperclip
+      - POSTGRES_DB=paperclip
+    volumes:
+      - paperclip_pgdata:/var/lib/postgresql/data
+    networks:
+      - clawstack
+    mem_limit: 256m
+    logging: *default-logging
 
 volumes:
   caddy_data:
   caddy_config:
   portal_data:
+  paperclip_data:
+  paperclip_pgdata:
 
 networks:
   clawstack:
