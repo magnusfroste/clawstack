@@ -31,13 +31,14 @@ services:
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASS=${ADMIN_PASS}
       - BASE_DOMAIN=${BASE_DOMAIN}
-      - OPENCLAW_IMAGE=${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.3.24}
+      - OPENCLAW_IMAGE=${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
       - TZ=${TZ:-Europe/Stockholm}
-      - INSTANCES_HOST_DIR=/opt/clawstack/instances
+      - INSTANCES_HOST_DIR=${PWD}/instances
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portal_data:/data
-      - /opt/clawstack/instances:/instances
+      - ${PWD}/instances:/instances
+      - .:/clawstack-config
     networks:
       - clawstack
     mem_limit: 256m
@@ -48,9 +49,9 @@ services:
     restart: unless-stopped
     environment:
       - BETTER_AUTH_SECRET=${PAPERCLIP_SECRETS_KEY}
-      - PAPERCLIP_PUBLIC_URL=https://boss.froste.eu
+      - PAPERCLIP_PUBLIC_URL=https://${PAPERCLIP_DOMAIN}
       - DATABASE_URL=postgres://paperclip:paperclip@paperclip-db:5432/paperclip
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - CLAUDE_BASE_URL=${CLAUDE_BASE_URL:-}
       - CLAUDE_AUTH_TOKEN=${CLAUDE_AUTH_TOKEN:-}
       - CLAUDE_MODEL=${CLAUDE_MODEL:-}

@@ -11,7 +11,7 @@
 }
 
 # Paperclip orchestrator
-boss.froste.eu {
+{$PAPERCLIP_DOMAIN} {
   reverse_proxy paperclip:3100
 }
 

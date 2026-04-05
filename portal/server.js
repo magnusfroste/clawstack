@@ -5,6 +5,7 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 const app = express();
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
@@ -35,6 +36,63 @@ db.exec(`
 try { db.exec(`ALTER TABLE instances ADD COLUMN role TEXT DEFAULT 'generalist'`); } catch {}
 // Migration: add image column if missing
 try { db.exec(`ALTER TABLE instances ADD COLUMN image TEXT`); } catch {}
+// Paperclip pending connections state
+db.exec(`CREATE TABLE IF NOT EXISTS paperclip_pending (
+  claw_name    TEXT PRIMARY KEY,
+  request_id   TEXT NOT NULL,
+  claim_secret TEXT NOT NULL,
+  gw_token     TEXT NOT NULL,
+  created_at   INTEGER DEFAULT (strftime('%s','now'))
+)`);
+
+// --- Shared helper: exec a shell command in any container ---
+async function containerExec(containerName, cmd, user = 'root', timeoutMs = 30000) {
+  const container = docker.getContainer(containerName);
+  const exec = await container.exec({ Cmd: ['sh', '-c', cmd], AttachStdout: true, AttachStderr: true, User: user });
+  const stream = await exec.start({ hijack: true, stdin: false });
+  const chunks = [];
+  await new Promise((resolve, reject) => {
+    stream.on('data', d => chunks.push(d));
+    stream.on('end', resolve);
+    stream.on('error', reject);
+    setTimeout(resolve, timeoutMs);
+  });
+  const buf = Buffer.concat(chunks);
+  let offset = 0, lines = [];
+  while (offset + 8 <= buf.length) {
+    const size = buf.readUInt32BE(offset + 4);
+    offset += 8;
+    if (offset + size > buf.length) break;
+    lines.push(buf.slice(offset, offset + size).toString('utf8'));
+    offset += size;
+  }
+  const output = (lines.join('') || buf.toString('utf8')).trim();
+  const info = await exec.inspect();
+  return { output, exitCode: info.ExitCode };
+}
+
+// --- Shared helper: internal HTTP JSON request ---
+function httpJSON(method, url, body) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const data = body ? JSON.stringify(body) : null;
+    const opts = {
+      hostname: u.hostname, port: u.port || 3100, path: u.pathname + (u.search || ''),
+      method, headers: { 'Content-Type': 'application/json', ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}) },
+    };
+    const req = require('http').request(opts, r => {
+      let d = ''; r.on('data', c => d += c);
+      r.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } });
+    });
+    req.on('error', reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+const PAPERCLIP_URL = 'http://paperclip:3100';
+const PAPERCLIP_CONTAINER = 'clawstack-paperclip-1';
+const PAPERCLIP_DB = 'clawstack-paperclip-db-1';
 
 // --- Reverse proxy: MUST be first — routes customer domains before any admin middleware ---
 const proxyCache = {};
@@ -254,8 +312,8 @@ app.post('/api/instances', requireAdmin, async (req, res) => {
       HostConfig: {
         NetworkMode: 'clawstack',
         RestartPolicy: { Name: 'unless-stopped' },
-        Memory: 900 * 1024 * 1024,       // 900 MB hard limit
-        MemorySwap: 1200 * 1024 * 1024,  // 1.2 GB incl. swap
+        Memory: 1536 * 1024 * 1024,       // 1.5 GB hard limit
+        MemorySwap: 2048 * 1024 * 1024,  // 2 GB incl. swap
         CpuQuota: 150000,                 // 1.5 CPUs max (period=100000)
         Binds: [
           `${INSTANCES_HOST_DIR}/${name}/config:/home/node/.openclaw`,
@@ -337,8 +395,8 @@ app.post('/api/instances/:name/recreate', requireAdmin, async (req, res) => {
       HostConfig: {
         NetworkMode: 'clawstack',
         RestartPolicy: { Name: 'unless-stopped' },
-        Memory: 900 * 1024 * 1024,
-        MemorySwap: 1200 * 1024 * 1024,
+        Memory: 1536 * 1024 * 1024,
+        MemorySwap: 2048 * 1024 * 1024,
         CpuQuota: 150000,
         Binds: [
           `${INSTANCES_HOST_DIR}/${row.name}/config:/home/node/.openclaw`,
@@ -529,6 +587,301 @@ app.get('/api/instances/:name/status', requireAdmin, async (req, res) => {
     db.prepare('UPDATE instances SET status = ? WHERE name = ?').run('error', req.params.name);
     res.json({ status: 'error' });
   }
+});
+
+// --- System stats ---
+function readProcStat() {
+  const line = fs.readFileSync('/proc/stat', 'utf8').split('\n')[0];
+  const vals = line.trim().split(/\s+/).slice(1).map(Number);
+  const idle = vals[3] + (vals[4] || 0);
+  const total = vals.reduce((a, b) => a + b, 0);
+  return { idle, total };
+}
+
+app.get('/api/system', requireAdmin, async (req, res) => {
+  // CPU — two samples 300ms apart
+  const t1 = readProcStat();
+  await new Promise(r => setTimeout(r, 300));
+  const t2 = readProcStat();
+  const idleDelta = t2.idle - t1.idle;
+  const totalDelta = t2.total - t1.total;
+  const cpuPct = totalDelta > 0 ? Math.round((1 - idleDelta / totalDelta) * 1000) / 10 : 0;
+
+  // Memory
+  const memData = fs.readFileSync('/proc/meminfo', 'utf8');
+  const getKB = key => parseInt(memData.match(new RegExp(key + ':\\s+(\\d+)'))?.[1] || 0) * 1024;
+  const memTotal = getKB('MemTotal');
+  const memUsed = memTotal - getKB('MemAvailable');
+
+  // Disk — /instances is a bind-mount from host; BusyBox df format: Filesystem 1-blocks Used Available Use% Mount
+  let diskUsed = 0, diskTotal = 1;
+  try {
+    const dfLine = execSync('df -B1 /instances 2>/dev/null | tail -1').toString().trim().split(/\s+/);
+    diskTotal = parseInt(dfLine[1]) || 1;
+    diskUsed  = parseInt(dfLine[2]) || 0;
+  } catch {}
+
+  // Containers — list all, fetch stats for running ones in parallel
+  const all = await docker.listContainers({ all: true });
+  const containers = await Promise.all(all.map(async c => {
+    const name = (c.Names[0] || '').replace(/^\//, '') || c.Id.slice(0, 12);
+    const base = { id: c.Id.slice(0, 12), name, status: c.State, image: c.Image, cpuPct: 0, memUsed: 0, memLimit: 0, memPct: 0 };
+    if (c.State !== 'running') return base;
+    try {
+      const s = await Promise.race([
+        docker.getContainer(c.Id).stats({ stream: false }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000)),
+      ]);
+      const cpuDelta = s.cpu_stats.cpu_usage.total_usage - s.precpu_stats.cpu_usage.total_usage;
+      const sysDelta = (s.cpu_stats.system_cpu_usage || 0) - (s.precpu_stats.system_cpu_usage || 0);
+      const ncpu = s.cpu_stats.online_cpus || s.cpu_stats.cpu_usage.percpu_usage?.length || 1;
+      const cpuPct = sysDelta > 0 ? Math.round((cpuDelta / sysDelta) * ncpu * 1000) / 10 : 0;
+      const memUsed = Math.max(0, (s.memory_stats.usage || 0) - (s.memory_stats.stats?.cache || 0));
+      const memLimit = s.memory_stats.limit || 0;
+      const memPct = memLimit > 0 ? Math.round(memUsed / memLimit * 100) : 0;
+      return { ...base, cpuPct, memUsed, memLimit, memPct };
+    } catch { return base; }
+  }));
+
+  containers.sort((a, b) => (b.status === 'running' ? 1 : 0) - (a.status === 'running' ? 1 : 0));
+
+  // Images
+  const rawImages = await docker.listImages({ all: false });
+  const usedImageIds = new Set(all.map(c => c.ImageID));
+  const images = rawImages.map(img => {
+    const repoTag = (img.RepoTags?.[0]) || (img.RepoDigests?.[0]?.split('@')[0] + ':<none>') || '<none>:<none>';
+    const [repo, tag] = repoTag.includes(':') ? repoTag.split(':') : [repoTag, '<none>'];
+    return {
+      id: img.Id.replace('sha256:', '').slice(0, 12),
+      repo,
+      tag,
+      size: img.Size,
+      dangling: !img.RepoTags || img.RepoTags[0] === '<none>:<none>',
+      inUse: usedImageIds.has(img.Id),
+    };
+  }).sort((a, b) => b.size - a.size);
+
+  res.json({
+    cpu:  { pct: cpuPct },
+    mem:  { used: memUsed,  total: memTotal,  pct: Math.round(memUsed  / memTotal  * 100) },
+    disk: { used: diskUsed, total: diskTotal, pct: Math.round(diskUsed / diskTotal * 100) },
+    containers,
+    images,
+  });
+});
+
+const CONFIG_DIR = '/clawstack-config';
+const ALLOWED_CONFIG_FILES = ['docker-compose.yml', '.env', 'Caddyfile'];
+
+app.get('/api/system/config/:file', requireAdmin, (req, res) => {
+  const name = req.params.file;
+  if (!ALLOWED_CONFIG_FILES.includes(name)) return res.status(400).json({ error: 'Not allowed' });
+  try {
+    const content = fs.readFileSync(path.join(CONFIG_DIR, name), 'utf8');
+    res.json({ content });
+  } catch (e) { res.status(404).json({ error: e.message }); }
+});
+
+app.post('/api/system/config/:file', requireAdmin, (req, res) => {
+  const name = req.params.file;
+  if (!ALLOWED_CONFIG_FILES.includes(name)) return res.status(400).json({ error: 'Not allowed' });
+  const { content } = req.body;
+  if (typeof content !== 'string') return res.status(400).json({ error: 'content required' });
+  try {
+    fs.writeFileSync(path.join(CONFIG_DIR, name), content, 'utf8');
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/system/prune', requireAdmin, async (req, res) => {
+  try {
+    const result = await docker.pruneImages({ filters: JSON.stringify({ dangling: { false: true } }) });
+    const freed = (result.SpaceReclaimed || 0);
+    const count = (result.ImagesDeleted || []).length;
+    res.json({ freed, count });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- Paperclip API ---
+
+app.get('/api/paperclip/status', requireAdmin, async (req, res) => {
+  const [ppInfo, dbInfo] = await Promise.all([
+    docker.getContainer(PAPERCLIP_CONTAINER).inspect().catch(() => null),
+    docker.getContainer(PAPERCLIP_DB).inspect().catch(() => null),
+  ]);
+
+  let apiHealth = null;
+  try { apiHealth = await Promise.race([httpJSON('GET', `${PAPERCLIP_URL}/api/health`), new Promise((_, r) => setTimeout(r, 3000))]); } catch {}
+
+  let agents = [];
+  try {
+    const q = `SELECT name, role, adapter_config->>'url' AS url, CASE WHEN last_heartbeat_at IS NULL THEN NULL ELSE extract(epoch from now()-last_heartbeat_at)::int END AS secs FROM agents WHERE adapter_type='openclaw_gateway' ORDER BY name`;
+    const { output } = await containerExec(PAPERCLIP_DB, `psql -U paperclip -d paperclip -t -A -F '|' -c "${q}"`, 'postgres');
+    agents = output.split('\n').filter(Boolean).map(l => {
+      const [name, role, url, secs] = l.split('|');
+      return { name, role, url, secondsAgo: secs ? parseInt(secs) : null };
+    });
+  } catch {}
+
+  const instances = db.prepare('SELECT name, container_name FROM instances').all();
+  const instanceStatus = await Promise.all(instances.map(async inst => {
+    let connected = false;
+    try { const r = await containerExec(inst.container_name, 'test -f /home/node/.openclaw/workspace/paperclip-claimed-api-key.json'); connected = r.exitCode === 0; } catch {}
+    const agent = agents.find(a => a.url && a.url.includes(inst.container_name)) || null;
+    return { name: inst.name, containerName: inst.container_name, connected, agent };
+  }));
+
+  const pending = db.prepare('SELECT claw_name, created_at FROM paperclip_pending').all();
+
+  res.json({
+    paperclip: { running: !!ppInfo?.State?.Running, status: ppInfo?.State?.Status || 'not found' },
+    db:        { running: !!dbInfo?.State?.Running, status: dbInfo?.State?.Status || 'not found' },
+    api: apiHealth,
+    agents,
+    instances: instanceStatus,
+    pending,
+  });
+});
+
+app.post('/api/paperclip/fix', requireAdmin, async (req, res) => {
+  const results = [];
+
+  // Fix 1: un-revoke token
+  try {
+    const { output } = await containerExec(PAPERCLIP_DB,
+      `psql -U paperclip -d paperclip -t -A -c "UPDATE agent_api_keys SET revoked_at=NULL WHERE key_hash='660c9c30b5d47cb01c32765aaad8382afe7ade4b765514502ca835f4dcb7585b' AND revoked_at IS NOT NULL RETURNING id"`,
+      'postgres');
+    const n = output.split('\n').filter(Boolean).length;
+    results.push({ fix: 1, label: 'Token un-revoke', msg: n > 0 ? 'Un-revoked.' : 'Already active.', changed: n > 0 });
+  } catch (e) { results.push({ fix: 1, label: 'Token un-revoke', msg: 'Error: ' + e.message, changed: false, error: true }); }
+
+  // Fix 2: payloadTemplate channel
+  try {
+    const { output } = await containerExec(PAPERCLIP_DB,
+      `psql -U paperclip -d paperclip -t -A -c "UPDATE agents SET adapter_config=adapter_config||'{\\"payloadTemplate\\":{\\"channel\\":\\"heartbeat\\"}}'::jsonb WHERE adapter_type='openclaw_gateway' AND (adapter_config->'payloadTemplate' IS NULL OR adapter_config->'payloadTemplate'->>'channel' IS NULL) RETURNING id"`,
+      'postgres');
+    const n = output.split('\n').filter(Boolean).length;
+    results.push({ fix: 2, label: 'payloadTemplate channel', msg: n > 0 ? `Set on ${n} agent(s).` : 'Already set.', changed: n > 0 });
+  } catch (e) { results.push({ fix: 2, label: 'payloadTemplate channel', msg: 'Error: ' + e.message, changed: false, error: true }); }
+
+  // Fix 3: Claude CLI
+  try {
+    const { exitCode } = await containerExec(PAPERCLIP_CONTAINER, 'which claude > /dev/null 2>&1');
+    if (exitCode === 0) {
+      results.push({ fix: 3, label: 'Claude CLI', msg: 'Already installed.', changed: false });
+    } else {
+      await containerExec(PAPERCLIP_CONTAINER, 'npm install -g @anthropic-ai/claude-code 2>&1', 'root', 120000);
+      results.push({ fix: 3, label: 'Claude CLI', msg: 'Installed.', changed: true });
+    }
+  } catch (e) { results.push({ fix: 3, label: 'Claude CLI', msg: 'Error: ' + e.message, changed: false, error: true }); }
+
+  // Fix 4: allow_remote_control
+  try {
+    const { output } = await containerExec(PAPERCLIP_CONTAINER,
+      `node -e "try{const p=require(process.env.HOME+'/.claude/policy-limits.json');process.stdout.write(String(p.restrictions?.allow_remote_control?.allowed))}catch{process.stdout.write('missing')}"`);
+    if (output === 'true') {
+      results.push({ fix: 4, label: 'allow_remote_control', msg: 'Already enabled.', changed: false });
+    } else {
+      await containerExec(PAPERCLIP_CONTAINER,
+        `mkdir -p ~/.claude && printf '{"restrictions":{"allow_remote_control":{"allowed":true}}}' > ~/.claude/policy-limits.json`);
+      results.push({ fix: 4, label: 'allow_remote_control', msg: 'Enabled.', changed: true });
+    }
+  } catch (e) { results.push({ fix: 4, label: 'allow_remote_control', msg: 'Error: ' + e.message, changed: false, error: true }); }
+
+  // Fix 5: private LLM env vars
+  try {
+    const [{ output: baseUrl }, { output: authToken }, { output: model }] = await Promise.all([
+      containerExec(PAPERCLIP_CONTAINER, 'printf "%s" "${CLAUDE_BASE_URL:-}"'),
+      containerExec(PAPERCLIP_CONTAINER, 'printf "%s" "${CLAUDE_AUTH_TOKEN:-}"'),
+      containerExec(PAPERCLIP_CONTAINER, 'printf "%s" "${CLAUDE_MODEL:-}"'),
+    ]);
+    if (baseUrl && authToken && model) {
+      const { output: already } = await containerExec(PAPERCLIP_CONTAINER, 'grep -q "ANTHROPIC_BASE_URL" ~/.bashrc 2>/dev/null && echo yes || echo no');
+      if (already === 'yes') {
+        results.push({ fix: 5, label: 'Private LLM', msg: 'Already in .bashrc.', changed: false });
+      } else {
+        await containerExec(PAPERCLIP_CONTAINER,
+          `printf '\\n# Private LLM\\nexport ANTHROPIC_BASE_URL="${baseUrl}"\\nexport ANTHROPIC_AUTH_TOKEN="${authToken}"\\nexport ANTHROPIC_API_KEY=""\\nexport CLAUDE_DEFAULT_MODEL="${model}"\\n' >> ~/.bashrc`);
+        results.push({ fix: 5, label: 'Private LLM', msg: `Written (model: ${model}).`, changed: true });
+      }
+    } else {
+      results.push({ fix: 5, label: 'Private LLM', msg: 'Not configured, skipped.', changed: false });
+    }
+  } catch (e) { results.push({ fix: 5, label: 'Private LLM', msg: 'Error: ' + e.message, changed: false, error: true }); }
+
+  res.json({ results });
+});
+
+app.post('/api/paperclip/connect', requireAdmin, async (req, res) => {
+  const { clawName, inviteToken } = req.body;
+  if (!clawName || !inviteToken) return res.status(400).json({ error: 'clawName and inviteToken required' });
+  const row = db.prepare('SELECT container_name FROM instances WHERE name = ?').get(clawName);
+  if (!row) return res.status(404).json({ error: 'Instance not found' });
+
+  let gwToken;
+  try {
+    const { output } = await containerExec(row.container_name,
+      `node -e "const c=require('/home/node/.openclaw/openclaw.json');process.stdout.write(c.gateway.auth.token)"`, 'node');
+    gwToken = output;
+  } catch (e) { return res.status(500).json({ error: 'Could not read gateway token: ' + e.message }); }
+  if (!gwToken) return res.status(500).json({ error: 'Empty gateway token' });
+
+  const agentName = clawName.charAt(0).toUpperCase() + clawName.slice(1);
+  try {
+    const resp = await httpJSON('POST', `${PAPERCLIP_URL}/api/invites/${inviteToken}/accept`, {
+      requestType: 'agent', agentName,
+      adapterType: 'openclaw_gateway',
+      capabilities: `OpenClaw agent — ClawStack instance ${clawName}`,
+      agentDefaultsPayload: {
+        url: `ws://clawstack-${clawName}:18789`,
+        paperclipApiUrl: PAPERCLIP_URL,
+        headers: { 'x-openclaw-token': gwToken },
+        waitTimeoutMs: 120000, sessionKeyStrategy: 'issue',
+        role: 'operator', scopes: ['operator.admin'],
+      },
+    });
+    if (!resp.id) return res.status(400).json({ error: resp.message || 'Paperclip rejected the request', detail: resp });
+    db.prepare('INSERT OR REPLACE INTO paperclip_pending (claw_name,request_id,claim_secret,gw_token) VALUES (?,?,?,?)')
+      .run(clawName, resp.id, resp.claimSecret, gwToken);
+    res.json({ success: true, requestId: resp.id, agentName });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/paperclip/finalize/:name', requireAdmin, async (req, res) => {
+  const pending = db.prepare('SELECT * FROM paperclip_pending WHERE claw_name = ?').get(req.params.name);
+  if (!pending) return res.status(404).json({ error: 'No pending connection for this instance' });
+  const row = db.prepare('SELECT container_name FROM instances WHERE name = ?').get(req.params.name);
+  if (!row) return res.status(404).json({ error: 'Instance not found' });
+
+  const steps = [];
+
+  let apiToken, agentId;
+  try {
+    const resp = await httpJSON('POST', `${PAPERCLIP_URL}/api/join-requests/${pending.request_id}/claim-api-key`, { claimSecret: pending.claim_secret });
+    if (!resp.token) return res.status(400).json({ error: resp.message || 'Claim failed — board approval pending?', steps });
+    apiToken = resp.token; agentId = resp.agentId;
+    steps.push({ ok: true, msg: 'API key claimed.' });
+  } catch (e) { return res.status(500).json({ error: e.message, steps }); }
+
+  try {
+    await containerExec(row.container_name,
+      `printf '%s' '{"token":"${apiToken}","agentId":"${agentId}"}' > /home/node/.openclaw/workspace/paperclip-claimed-api-key.json && chmod 600 /home/node/.openclaw/workspace/paperclip-claimed-api-key.json && chown node:node /home/node/.openclaw/workspace/paperclip-claimed-api-key.json`);
+    steps.push({ ok: true, msg: 'API key saved to container.' });
+  } catch (e) { steps.push({ ok: false, msg: 'Could not save API key: ' + e.message }); }
+
+  try {
+    await containerExec(row.container_name,
+      `mkdir -p /home/node/.openclaw/skills/paperclip && curl -fsS '${PAPERCLIP_URL}/api/skills/paperclip' > /home/node/.openclaw/skills/paperclip/SKILL.md && sed -i '1s|^|PAPERCLIP_API_URL: ${PAPERCLIP_URL}\\n\\n|' /home/node/.openclaw/skills/paperclip/SKILL.md && chown -R node:node /home/node/.openclaw/skills`);
+    steps.push({ ok: true, msg: 'Paperclip skill installed.' });
+  } catch (e) { steps.push({ ok: false, msg: 'Skill install failed: ' + e.message }); }
+
+  try {
+    await containerExec(row.container_name, 'openclaw devices list > /dev/null 2>&1 && openclaw devices approve --latest 2>&1', 'node');
+    steps.push({ ok: true, msg: 'Device paired.' });
+  } catch (e) { steps.push({ ok: false, msg: 'Device approval failed — retry via Paperclip: ' + e.message }); }
+
+  db.prepare('DELETE FROM paperclip_pending WHERE claw_name = ?').run(req.params.name);
+  res.json({ success: true, steps });
 });
 
 // --- Preset openclaw.json config fragments ---
@@ -1011,6 +1364,92 @@ app.get('/', requireAdmin, (req, res) => {
     #mgr-logs{flex:1;background:var(--bg);color:var(--text3);overflow-y:auto;padding:14px 18px;font-family:monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;display:none}
     #mgr-footer{display:flex;align-items:center;gap:8px;padding:8px 16px;border-top:1px solid var(--border);background:var(--surface);flex-shrink:0}
     #mgr-status{font-size:0.75rem;color:var(--text3)}
+    /* ── Top nav ── */
+    .page-nav{display:flex;gap:2px;padding:3px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);width:fit-content}
+    .page-nav-btn{padding:5px 16px;font-size:0.78rem;font-weight:500;border:none;background:none;color:var(--text3);border-radius:5px;cursor:pointer;transition:all .15s}
+    .page-nav-btn:hover{color:var(--text2)}
+    .page-nav-btn.active{background:var(--surface2);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.3)}
+    /* ── System page ── */
+    .sys-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:1.5rem}
+    .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem 1.5rem;display:flex;align-items:center;gap:1.25rem}
+    .stat-card:hover{border-color:var(--border2)}
+    .ring-wrap{position:relative;width:72px;height:72px;flex-shrink:0}
+    .ring-svg{width:100%;height:100%;transform:rotate(-90deg)}
+    .ring-track{fill:none;stroke:var(--border2);stroke-width:3.5}
+    .ring-prog{fill:none;stroke-width:3.5;stroke-linecap:round;transition:stroke-dasharray .4s ease}
+    .ring-val{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:0.9rem;font-weight:700;color:var(--text)}
+    .stat-info{flex:1;min-width:0}
+    .stat-label{font-size:0.68rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+    .stat-main{font-size:1.5rem;font-weight:700;color:var(--text);line-height:1;margin-bottom:3px}
+    .stat-sub{font-size:0.72rem;color:var(--text3)}
+    /* ── Container table ── */
+    .ct-head,.ct-row{display:grid;grid-template-columns:minmax(160px,2fr) 80px 130px 170px minmax(100px,1fr);align-items:center;gap:1rem;padding:0 1.25rem}
+    .ct-head{padding-top:.5rem;padding-bottom:.5rem;font-size:0.65rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;border-bottom:1px solid var(--border)}
+    .ct-row{padding-top:.65rem;padding-bottom:.65rem;border-bottom:1px solid var(--border);transition:background .12s}
+    .ct-row:last-child{border-bottom:none}
+    .ct-row:hover{background:var(--surface2)}
+    .ct-name-cell{display:flex;align-items:center;gap:8px;min-width:0}
+    .ct-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+    .ct-dot.running{background:var(--green);box-shadow:0 0 5px rgba(34,197,94,.5)}
+    .ct-dot.exited,.ct-dot.dead{background:var(--text3)}
+    .ct-dot.paused,.ct-dot.restarting{background:var(--amber)}
+    .ct-name-text{font-size:0.82rem;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ct-cpu-pct,.ct-stat-val{font-size:0.78rem;color:var(--text2);font-variant-numeric:tabular-nums}
+    .mini-bar-wrap{margin-top:3px;height:3px;background:var(--border2);border-radius:2px;overflow:hidden}
+    .mini-bar-fill{height:100%;border-radius:2px;transition:width .3s ease}
+    .mini-bar-fill.cpu{background:var(--blue)}
+    .mini-bar-fill.mem{background:var(--green)}
+    .mini-bar-fill.warn{background:var(--amber)}
+    .mini-bar-fill.danger{background:var(--red)}
+    .ct-image-tag{font-size:0.7rem;color:var(--text3);font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ct-status-badge{font-size:0.68rem;font-weight:600;padding:2px 8px;border-radius:99px;text-transform:uppercase;letter-spacing:.03em;width:fit-content}
+    .ct-status-badge.running{background:var(--green-bg);color:var(--green)}
+    .ct-status-badge.exited,.ct-status-badge.dead{background:var(--surface2);color:var(--text3)}
+    .ct-status-badge.restarting,.ct-status-badge.paused{background:var(--amber-bg);color:var(--amber)}
+    .sys-refresh{font-size:0.7rem;color:var(--text3)}
+    /* ── Config editor ── */
+    .cfg-tabs{display:flex;gap:2px;padding:3px;background:var(--surface2);border-bottom:1px solid var(--border)}
+    .cfg-tab{padding:5px 14px;font-size:0.75rem;font-weight:500;border:none;background:none;color:var(--text3);border-radius:4px;cursor:pointer;transition:all .12s;font-family:monospace}
+    .cfg-tab:hover{color:var(--text2)}
+    .cfg-tab.active{background:var(--bg);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.3)}
+    .cfg-editor{width:100%;background:var(--bg);color:#c9d1d9;border:none;outline:none;resize:none;padding:16px 20px;font-family:'Fira Code',Consolas,monospace;font-size:12.5px;line-height:1.7;tab-size:2;min-height:320px}
+    .cfg-footer{display:flex;align-items:center;gap:10px;padding:8px 14px;border-top:1px solid var(--border);background:var(--surface)}
+    /* ── Images table ── */
+    .img-table{width:100%;border-collapse:collapse;font-size:0.82rem}
+    .img-table th{padding:8px 14px;font-size:0.65rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;text-align:left;border-bottom:1px solid var(--border)}
+    .img-table td{padding:9px 14px;border-bottom:1px solid var(--border);vertical-align:middle}
+    .img-table tr:last-child td{border-bottom:none}
+    .img-table tr:hover td{background:var(--surface2)}
+    .img-repo{font-weight:500;color:var(--text)}
+    .img-tag{font-size:0.72rem;color:var(--blue);font-family:monospace}
+    .img-size{font-variant-numeric:tabular-nums;font-size:0.78rem;color:var(--text2)}
+    .img-size-bar{height:3px;background:var(--border2);border-radius:2px;margin-top:3px;overflow:hidden}
+    .img-size-fill{height:100%;background:var(--blue);border-radius:2px}
+    .dangling-badge{font-size:0.65rem;padding:1px 6px;border-radius:99px;background:var(--amber-bg);color:var(--amber);font-weight:600}
+    .inuse-badge{font-size:0.65rem;padding:1px 6px;border-radius:99px;background:var(--green-bg);color:var(--green);font-weight:600}
+    /* ── Paperclip page ── */
+    .pp-status-row{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:1.5rem}
+    .pp-status-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.25rem;display:flex;flex-direction:column;gap:4px}
+    .pp-status-label{font-size:0.65rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.08em}
+    .pp-status-val{font-size:0.95rem;font-weight:600;color:var(--text);display:flex;align-items:center;gap:6px}
+    .pp-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+    .pp-dot.ok{background:var(--green);box-shadow:0 0 5px rgba(34,197,94,.4)}
+    .pp-dot.err{background:var(--red)}
+    .pp-dot.warn{background:var(--amber)}
+    .pp-sub{font-size:0.72rem;color:var(--text3)}
+    .pp-agents-table,.pp-inst-table{width:100%;border-collapse:collapse;font-size:0.82rem}
+    .pp-agents-table th,.pp-inst-table th{padding:8px 14px;font-size:0.65rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;text-align:left;border-bottom:1px solid var(--border)}
+    .pp-agents-table td,.pp-inst-table td{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:middle}
+    .pp-agents-table tr:last-child td,.pp-inst-table tr:last-child td{border-bottom:none}
+    .pp-agents-table tr:hover td,.pp-inst-table tr:hover td{background:var(--surface2)}
+    .pp-hb{font-size:0.72rem;color:var(--text3);font-family:monospace}
+    .pp-fix-result{display:flex;align-items:baseline;gap:8px;padding:4px 0;font-size:0.8rem}
+    .pp-fix-label{font-weight:500;color:var(--text2);min-width:160px}
+    .pp-fix-msg{color:var(--text3)}
+    .pp-fix-msg.changed{color:var(--green)}
+    .pp-fix-msg.error{color:var(--red)}
+    .pp-invite-row{display:flex;gap:8px;margin-top:6px}
+    .pp-invite-row input{flex:1}
     /* ── Terminal panels (CLI + Exec) ── */
     .term-panel{flex:1;display:none;flex-direction:column;overflow:hidden}
     .term-output{flex:1;background:var(--bg);overflow-y:auto;padding:14px 18px;font-family:monospace;font-size:12px;line-height:1.6;white-space:pre-wrap}
@@ -1052,8 +1491,14 @@ app.get('/', requireAdmin, (req, res) => {
         <div class="logo-sub">OpenClaw instance manager</div>
       </div>
     </div>
+    <div class="page-nav">
+      <button class="page-nav-btn active" id="nav-instances"  onclick="showPage('instances')">Instances</button>
+      <button class="page-nav-btn"        id="nav-system"     onclick="showPage('system')">System</button>
+      <button class="page-nav-btn"        id="nav-paperclip"  onclick="showPage('paperclip')">Paperclip</button>
+    </div>
   </div>
 
+<div id="instances-page">
   <!-- New instance -->
   <div class="section">
     <div class="section-head"><span class="section-title">New instance</span></div>
@@ -1138,6 +1583,152 @@ app.get('/', requireAdmin, (req, res) => {
         </div>
       </div>`).join('')}</div>`}
   </div>
+</div><!-- /instances-page -->
+
+<!-- ══ System page ══ -->
+<div id="system-page" style="display:none">
+  <div class="sys-grid">
+    <div class="stat-card">
+      <div class="ring-wrap">
+        <svg class="ring-svg" viewBox="0 0 36 36">
+          <circle class="ring-track" cx="18" cy="18" r="15.9"/>
+          <circle class="ring-prog" id="ring-cpu" cx="18" cy="18" r="15.9" stroke="var(--blue)"
+            stroke-dasharray="0 100" stroke-dashoffset="0"/>
+        </svg>
+        <div class="ring-val" id="ring-cpu-val">—</div>
+      </div>
+      <div class="stat-info">
+        <div class="stat-label">CPU</div>
+        <div class="stat-main" id="stat-cpu-main">—</div>
+        <div class="stat-sub" id="stat-cpu-sub">usage</div>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="ring-wrap">
+        <svg class="ring-svg" viewBox="0 0 36 36">
+          <circle class="ring-track" cx="18" cy="18" r="15.9"/>
+          <circle class="ring-prog" id="ring-mem" cx="18" cy="18" r="15.9" stroke="var(--green)"
+            stroke-dasharray="0 100" stroke-dashoffset="0"/>
+        </svg>
+        <div class="ring-val" id="ring-mem-val">—</div>
+      </div>
+      <div class="stat-info">
+        <div class="stat-label">Memory</div>
+        <div class="stat-main" id="stat-mem-main">—</div>
+        <div class="stat-sub" id="stat-mem-sub">of total</div>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="ring-wrap">
+        <svg class="ring-svg" viewBox="0 0 36 36">
+          <circle class="ring-track" cx="18" cy="18" r="15.9"/>
+          <circle class="ring-prog" id="ring-disk" cx="18" cy="18" r="15.9" stroke="var(--amber)"
+            stroke-dasharray="0 100" stroke-dashoffset="0"/>
+        </svg>
+        <div class="ring-val" id="ring-disk-val">—</div>
+      </div>
+      <div class="stat-info">
+        <div class="stat-label">Disk</div>
+        <div class="stat-main" id="stat-disk-main">—</div>
+        <div class="stat-sub" id="stat-disk-sub">of total</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Containers</span>
+      <span class="sys-refresh" id="sys-refresh-ts"></span>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="ct-head">
+        <div>Name</div><div>Status</div><div>CPU</div><div>Memory</div><div>Image</div>
+      </div>
+      <div id="ct-body"></div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head"><span class="section-title">Stack config</span></div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="cfg-tabs">
+        <button class="cfg-tab active" id="cfg-tab-env"          onclick="cfgLoad('.env')">          .env</button>
+        <button class="cfg-tab"        id="cfg-tab-compose"      onclick="cfgLoad('docker-compose.yml')">docker-compose.yml</button>
+        <button class="cfg-tab"        id="cfg-tab-caddyfile"    onclick="cfgLoad('Caddyfile')">     Caddyfile</button>
+      </div>
+      <textarea id="cfg-editor" class="cfg-editor" spellcheck="false"></textarea>
+      <div class="cfg-footer">
+        <button class="btn sm" onclick="cfgSave()" id="cfg-save-btn">Save</button>
+        <span id="cfg-status" style="font-size:0.75rem;color:var(--text3)"></span>
+        <span style="flex:1"></span>
+        <span style="font-size:0.7rem;color:var(--text3)">Changes to compose/.env require <code style="color:var(--text2)">docker compose up -d</code> to take effect</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><span class="section-title">Images</span>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="sys-images-total" class="sys-refresh"></span>
+        <button class="btn danger sm" onclick="pruneImages()" id="prune-btn">Prune unused</button>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table class="img-table">
+        <thead><tr><th>Repository</th><th>Tag</th><th>Size</th><th>Status</th></tr></thead>
+        <tbody id="img-body"></tbody>
+      </table>
+    </div>
+    <div id="prune-result" style="display:none;margin-top:.5rem;font-size:0.78rem;color:var(--green)"></div>
+  </div>
+
+</div><!-- /system-page -->
+
+<!-- ══ Paperclip page ══ -->
+<div id="paperclip-page" style="display:none">
+
+  <div class="pp-status-row">
+    <div class="pp-status-card">
+      <div class="pp-status-label">Paperclip</div>
+      <div class="pp-status-val"><span class="pp-dot" id="pp-dot-app"></span><span id="pp-val-app">—</span></div>
+      <div class="pp-sub" id="pp-sub-app"></div>
+    </div>
+    <div class="pp-status-card">
+      <div class="pp-status-label">Database</div>
+      <div class="pp-status-val"><span class="pp-dot" id="pp-dot-db"></span><span id="pp-val-db">—</span></div>
+      <div class="pp-sub" id="pp-sub-db"></div>
+    </div>
+    <div class="pp-status-card">
+      <div class="pp-status-label">API</div>
+      <div class="pp-status-val"><span class="pp-dot" id="pp-dot-api"></span><span id="pp-val-api">—</span></div>
+      <div class="pp-sub" id="pp-sub-api"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Instances</span>
+      <button class="btn ghost sm" onclick="ppFix()" id="pp-fix-btn">Run Fix</button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table class="pp-inst-table">
+        <thead><tr><th>Instance</th><th>Paperclip</th><th>Last heartbeat</th><th>Action</th></tr></thead>
+        <tbody id="pp-inst-body"><tr><td colspan="4" style="color:var(--text3);padding:2rem;text-align:center">Loading…</td></tr></tbody>
+      </table>
+    </div>
+    <div id="pp-fix-results" style="margin-top:.75rem;display:none" class="card"></div>
+  </div>
+
+  <div class="section" id="pp-agents-section" style="display:none">
+    <div class="section-head"><span class="section-title">Connected agents</span></div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table class="pp-agents-table">
+        <thead><tr><th>Name</th><th>Role</th><th>Gateway URL</th><th>Last heartbeat</th></tr></thead>
+        <tbody id="pp-agents-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div><!-- /paperclip-page -->
 
 </div><!-- /page -->
 
@@ -1222,6 +1813,7 @@ app.get('/', requireAdmin, (req, res) => {
       <div id="mgr-footer">
         <button id="btn-save" class="btn sm" onclick="saveFile()" disabled>Save</button>
         <button id="btn-refresh-logs" class="btn ghost sm" style="display:none" onclick="loadLogs()">↻ Refresh</button>
+        <button id="btn-copy-logs"   class="btn ghost sm" style="display:none" onclick="copyLogs()">⎘ Copy</button>
         <span id="mgr-status"></span>
       </div>
     </div>
@@ -1333,6 +1925,7 @@ app.get('/', requireAdmin, (req, res) => {
       document.getElementById('mgr-version').style.display=tab==='version'?'flex':'none';
       document.getElementById('btn-save').style.display=tab==='files'?'':'none';
       document.getElementById('btn-refresh-logs').style.display=tab==='logs'?'':'none';
+      document.getElementById('btn-copy-logs').style.display=tab==='logs'?'':'none';
       document.getElementById('mgr-tree').style.display=tab==='files'?'':'none';
       if(tab==='files'){
         if(!document.getElementById('mgr-tree').children.length) loadTree('');
@@ -1430,6 +2023,15 @@ app.get('/', requireAdmin, (req, res) => {
       document.getElementById('btn-save').disabled=false;
       document.getElementById('mgr-status').textContent=d.success?'Saved ✓':('Error: '+d.error);
       if(d.success) setTimeout(()=>document.getElementById('mgr-status').textContent='',2500);
+    }
+
+    async function copyLogs(){
+      const txt=document.getElementById('mgr-logs').textContent;
+      if(!txt) return;
+      await navigator.clipboard.writeText(txt);
+      const btn=document.getElementById('btn-copy-logs');
+      btn.textContent='✓ Copied';
+      setTimeout(()=>btn.textContent='⎘ Copy',2000);
     }
 
     async function loadLogs(){
@@ -1550,6 +2152,278 @@ app.get('/', requireAdmin, (req, res) => {
       }
     }
 
+    // ── Page navigation ──
+    let sysTimer = null;
+    let ppTimer  = null;
+
+    function showPage(name) {
+      ['instances','system','paperclip'].forEach(p => {
+        document.getElementById(p + '-page').style.display = name === p ? '' : 'none';
+        document.getElementById('nav-' + p).classList.toggle('active', name === p);
+      });
+      clearInterval(sysTimer); clearInterval(ppTimer);
+      if (name === 'system')    { loadSystem(); cfgLoad('.env'); sysTimer = setInterval(loadSystem, 5000); }
+      if (name === 'paperclip') { loadPaperclip();  ppTimer  = setInterval(loadPaperclip, 8000); }
+    }
+
+    // ── Paperclip page ──
+    function fmtHB(secondsAgo) {
+      if (secondsAgo === null || secondsAgo === undefined) return '<span style="color:var(--text3)">never</span>';
+      if (secondsAgo < 120)  return '<span style="color:var(--green)">' + secondsAgo + 's ago</span>';
+      if (secondsAgo < 3600) return '<span style="color:var(--amber)">' + Math.round(secondsAgo/60) + 'm ago</span>';
+      return '<span style="color:var(--red)">' + Math.round(secondsAgo/3600) + 'h ago</span>';
+    }
+
+    async function loadPaperclip() {
+      let d;
+      try { d = await api('GET', '/api/paperclip/status'); } catch { return; }
+
+      // Status cards
+      const setCard = (id, running, status, sub) => {
+        const dot = document.getElementById('pp-dot-' + id);
+        dot.className = 'pp-dot ' + (running ? 'ok' : 'err');
+        document.getElementById('pp-val-' + id).textContent = status;
+        document.getElementById('pp-sub-' + id).textContent = sub || '';
+      };
+      setCard('app', d.paperclip.running, d.paperclip.running ? 'Running' : d.paperclip.status);
+      setCard('db',  d.db.running,        d.db.running  ? 'Running' : d.db.status);
+      setCard('api', !!d.api, d.api ? d.api.status : 'unreachable', d.api?.deploymentMode || '');
+      if (d.api) document.getElementById('pp-dot-api').className = 'pp-dot ' + (d.api.status === 'ok' ? 'ok' : 'warn');
+
+      // Instances table
+      const instBody = document.getElementById('pp-inst-body');
+      if (!d.instances.length) {
+        instBody.innerHTML = '<tr><td colspan="4" style="color:var(--text3);padding:1.5rem;text-align:center">No instances found.</td></tr>';
+      } else {
+        instBody.innerHTML = d.instances.map(inst => {
+          const isPending = d.pending.some(p => p.claw_name === inst.name);
+          let statusCell, actionCell;
+          if (inst.connected) {
+            statusCell = '<span class="badge running">Connected</span>';
+            actionCell = \`<button class="btn ghost xs" onclick="ppDisconnect('\${inst.name}')">Disconnect</button>\`;
+          } else if (isPending) {
+            statusCell = '<span class="badge starting">Awaiting approval</span>';
+            actionCell = \`<button class="btn green xs" onclick="ppFinalize('\${inst.name}')">Finalize</button>\`;
+          } else {
+            statusCell = '<span class="badge stopped">Not connected</span>';
+            actionCell = \`<div class="pp-invite-row">
+              <input id="invite-\${inst.name}" placeholder="pcp_invite_…" style="font-size:0.75rem">
+              <button class="btn sm" onclick="ppConnect('\${inst.name}')">Connect</button>
+            </div>\`;
+          }
+          const hb = inst.agent ? fmtHB(inst.agent.secondsAgo) : '<span style="color:var(--text3)">—</span>';
+          return \`<tr>
+            <td style="font-weight:500">\${inst.name}</td>
+            <td>\${statusCell}</td>
+            <td class="pp-hb">\${hb}</td>
+            <td>\${actionCell}</td>
+          </tr>\`;
+        }).join('');
+      }
+
+      // Agents section
+      if (d.agents.length) {
+        document.getElementById('pp-agents-section').style.display = '';
+        document.getElementById('pp-agents-body').innerHTML = d.agents.map(a => \`<tr>
+          <td style="font-weight:500">\${a.name}</td>
+          <td><span class="badge role">\${a.role || '—'}</span></td>
+          <td style="font-size:0.72rem;color:var(--text3);font-family:monospace">\${a.url || '—'}</td>
+          <td class="pp-hb">\${fmtHB(a.secondsAgo)}</td>
+        </tr>\`).join('');
+      } else {
+        document.getElementById('pp-agents-section').style.display = 'none';
+      }
+    }
+
+    async function ppConnect(clawName) {
+      const token = document.getElementById('invite-' + clawName)?.value?.trim();
+      if (!token) { alert('Paste an invite token first.'); return; }
+      const d = await api('POST', '/api/paperclip/connect', { clawName, inviteToken: token });
+      if (d.error) { alert('Error: ' + d.error + (d.detail ? '\\n' + JSON.stringify(d.detail) : '')); return; }
+      alert('Join request sent for ' + d.agentName + '.\\n\\nNow approve it in Paperclip UI (boss.froste.eu → Company Settings → Join requests), then click Finalize.');
+      loadPaperclip();
+    }
+
+    async function ppFinalize(clawName) {
+      const d = await api('POST', '/api/paperclip/finalize/' + clawName);
+      if (d.error) { alert('Error: ' + d.error); return; }
+      const stepLog = (d.steps || []).map(s => (s.ok ? '✓' : '✗') + ' ' + s.msg).join('\\n');
+      alert('Done!\\n\\n' + stepLog);
+      loadPaperclip();
+    }
+
+    async function ppDisconnect(clawName) {
+      if (!confirm('Remove Paperclip connection from ' + clawName + '?\\nThis only removes local files, not the Paperclip agent record.')) return;
+      await api('POST', '/api/instances/' + clawName + '/exec', { cmd: 'rm -f /home/node/.openclaw/workspace/paperclip-claimed-api-key.json' });
+      loadPaperclip();
+    }
+
+    async function ppFix() {
+      const btn = document.getElementById('pp-fix-btn');
+      btn.disabled = true; btn.textContent = 'Running…';
+      const d = await api('POST', '/api/paperclip/fix');
+      btn.disabled = false; btn.textContent = 'Run Fix';
+      const el = document.getElementById('pp-fix-results');
+      el.style.display = '';
+      el.innerHTML = (d.results || []).map(r =>
+        \`<div class="pp-fix-result">
+          <span class="pp-fix-label">Fix \${r.fix}: \${r.label}</span>
+          <span class="pp-fix-msg \${r.error ? 'error' : r.changed ? 'changed' : ''}">\${r.msg}</span>
+        </div>\`
+      ).join('');
+      loadPaperclip();
+    }
+
+    // ── System page ──
+    let sysTimerDummy = null; // kept for reference, managed above
+
+    function fmtBytes(b) {
+      if (b === 0) return '0 B';
+      const u = ['B','KB','MB','GB','TB'];
+      const i = Math.floor(Math.log(b) / Math.log(1024));
+      return (b / Math.pow(1024, i)).toFixed(i > 1 ? 1 : 0) + ' ' + u[i];
+    }
+
+    function setRing(id, pct, color) {
+      const circ = 2 * Math.PI * 15.9; // ≈ 99.9
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.setAttribute('stroke-dasharray', \`\${(pct / 100 * circ).toFixed(1)} \${circ.toFixed(1)}\`);
+      if (color) el.style.stroke = color;
+    }
+
+    function ringColor(pct) {
+      if (pct >= 90) return 'var(--red)';
+      if (pct >= 70) return 'var(--amber)';
+      return null; // keep default
+    }
+
+    async function loadSystem() {
+      let d;
+      try { d = await api('GET', '/api/system'); } catch { return; }
+
+      // CPU
+      const cpuC = ringColor(d.cpu.pct);
+      setRing('ring-cpu', d.cpu.pct, cpuC);
+      document.getElementById('ring-cpu-val').textContent  = d.cpu.pct + '%';
+      document.getElementById('stat-cpu-main').textContent = d.cpu.pct + '%';
+      if (cpuC) document.getElementById('ring-cpu-val').style.color = cpuC;
+
+      // Memory
+      const memC = ringColor(d.mem.pct);
+      setRing('ring-mem', d.mem.pct, memC);
+      document.getElementById('ring-mem-val').textContent  = d.mem.pct + '%';
+      document.getElementById('stat-mem-main').textContent = fmtBytes(d.mem.used);
+      document.getElementById('stat-mem-sub').textContent  = 'of ' + fmtBytes(d.mem.total);
+
+      // Disk
+      const diskC = ringColor(d.disk.pct);
+      setRing('ring-disk', d.disk.pct, diskC);
+      document.getElementById('ring-disk-val').textContent  = d.disk.pct + '%';
+      document.getElementById('stat-disk-main').textContent = fmtBytes(d.disk.used);
+      document.getElementById('stat-disk-sub').textContent  = 'of ' + fmtBytes(d.disk.total);
+
+      // Containers
+      const body = document.getElementById('ct-body');
+      body.innerHTML = d.containers.map(c => {
+        const memBarPct = Math.min(c.memPct, 100);
+        const cpuBarPct = Math.min(c.cpuPct * 5, 100); // scale: 20% CPU = full bar
+        const memBarClass = c.memPct >= 90 ? 'danger' : c.memPct >= 70 ? 'warn' : 'mem';
+        const imgTag = c.image.includes(':') ? c.image.split(':').pop() : c.image;
+        const imgBase = c.image.includes('/') ? c.image.split('/').pop().split(':')[0] : c.image.split(':')[0];
+        return \`<div class="ct-row">
+          <div class="ct-name-cell">
+            <span class="ct-dot \${c.status}"></span>
+            <span class="ct-name-text" title="\${c.name}">\${c.name}</span>
+          </div>
+          <div><span class="ct-status-badge \${c.status}">\${c.status}</span></div>
+          <div>
+            <div class="ct-cpu-pct">\${c.status === 'running' ? c.cpuPct.toFixed(1) + '%' : '—'}</div>
+            <div class="mini-bar-wrap"><div class="mini-bar-fill cpu" style="width:\${cpuBarPct}%"></div></div>
+          </div>
+          <div>
+            <div class="ct-stat-val">\${c.memLimit > 0 ? fmtBytes(c.memUsed) + ' / ' + fmtBytes(c.memLimit) : '—'}</div>
+            <div class="mini-bar-wrap"><div class="mini-bar-fill \${memBarClass}" style="width:\${memBarPct}%"></div></div>
+          </div>
+          <div class="ct-image-tag" title="\${c.image}">\${imgBase}:<span style="color:var(--text2)">\${imgTag}</span></div>
+        </div>\`;
+      }).join('');
+
+      // Images
+      const maxSize = Math.max(...(d.images || []).map(i => i.size), 1);
+      const totalImgSize = (d.images || []).reduce((s, i) => s + i.size, 0);
+      document.getElementById('sys-images-total').textContent =
+        (d.images || []).length + ' images — ' + fmtBytes(totalImgSize);
+      document.getElementById('img-body').innerHTML = (d.images || []).map(img => {
+        const barPct = Math.round(img.size / maxSize * 100);
+        const shortRepo = img.repo.includes('/') ? img.repo.split('/').slice(-2).join('/') : img.repo;
+        const badge = img.dangling
+          ? '<span class="dangling-badge">dangling</span>'
+          : img.inUse
+            ? '<span class="inuse-badge">in use</span>'
+            : '<span style="font-size:0.65rem;color:var(--text3)">unused</span>';
+        return \`<tr>
+          <td class="img-repo" title="\${img.repo}">\${shortRepo}</td>
+          <td class="img-tag">\${img.tag}</td>
+          <td class="img-size">
+            \${fmtBytes(img.size)}
+            <div class="img-size-bar"><div class="img-size-fill" style="width:\${barPct}%"></div></div>
+          </td>
+          <td>\${badge}</td>
+        </tr>\`;
+      }).join('');
+
+      const now = new Date();
+      document.getElementById('sys-refresh-ts').textContent =
+        'Updated ' + now.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    }
+
+    // ── Config editor ──
+    let cfgCurrentFile = '.env';
+    const cfgTabMap = { '.env': 'cfg-tab-env', 'docker-compose.yml': 'cfg-tab-compose', 'Caddyfile': 'cfg-tab-caddyfile' };
+
+    async function cfgLoad(file) {
+      cfgCurrentFile = file;
+      Object.entries(cfgTabMap).forEach(([f, id]) =>
+        document.getElementById(id).classList.toggle('active', f === file));
+      const editor = document.getElementById('cfg-editor');
+      editor.value = 'Loading…';
+      document.getElementById('cfg-status').textContent = '';
+      const d = await api('GET', '/api/system/config/' + encodeURIComponent(file));
+      editor.value = d.error ? ('Error: ' + d.error) : d.content;
+    }
+
+    async function cfgSave() {
+      const btn = document.getElementById('cfg-save-btn');
+      const st  = document.getElementById('cfg-status');
+      btn.disabled = true;
+      const d = await api('POST', '/api/system/config/' + encodeURIComponent(cfgCurrentFile),
+        { content: document.getElementById('cfg-editor').value });
+      btn.disabled = false;
+      if (d.error) { st.style.color = 'var(--red)'; st.textContent = 'Error: ' + d.error; }
+      else { st.style.color = 'var(--green)'; st.textContent = 'Saved.'; setTimeout(() => st.textContent = '', 3000); }
+    }
+
+    document.getElementById('cfg-editor').addEventListener('keydown', e => {
+      if (e.key !== 'Tab') return;
+      e.preventDefault();
+      const t = e.target, s = t.selectionStart, end = t.selectionEnd;
+      t.value = t.value.slice(0, s) + '  ' + t.value.slice(end);
+      t.selectionStart = t.selectionEnd = s + 2;
+    });
+
+    async function pruneImages() {
+      const btn = document.getElementById('prune-btn');
+      btn.disabled = true; btn.textContent = 'Pruning…';
+      const d = await api('POST', '/api/system/prune');
+      btn.disabled = false; btn.textContent = 'Prune unused';
+      const el = document.getElementById('prune-result');
+      el.style.display = '';
+      if (d.error) { el.style.color = 'var(--red)'; el.textContent = 'Error: ' + d.error; }
+      else { el.style.color = 'var(--green)'; el.textContent = 'Removed ' + d.count + ' image(s), freed ' + fmtBytes(d.freed) + '.'; }
+      loadSystem();
+    }
+
     // Tab key inserts 2 spaces
     document.getElementById('mgr-editor').addEventListener('keydown',e=>{
       if(e.key!=='Tab') return;
@@ -1587,11 +2461,24 @@ app.post('/admin/instances/:name/delete', requireAdmin, async (req, res) => {
 
 const server = app.listen(3000, () => console.log(`ClawStack portal running on :3000`));
 
-// WebSocket upgrade handler — required for OpenClaw's WS connections
+// WebSocket upgrade handler — native TCP pipe, http-proxy-middleware's .upgrade() is unreliable
 server.on('upgrade', (req, socket, head) => {
   const host = req.headers.host?.split(':')[0];
   if (!host || host === BASE_DOMAIN) return socket.destroy();
   const row = db.prepare('SELECT container_name FROM instances WHERE domain = ?').get(host);
   if (!row) return socket.destroy();
-  getProxy(row.container_name).upgrade(req, socket, head);
+  const isA2A = req.url.startsWith('/a2a/') || req.url === '/.well-known/agent.json';
+  const port = isA2A ? 18800 : 18789;
+  const upstream = require('net').createConnection({ host: row.container_name, port }, () => {
+    // Forward original upgrade request headers
+    const headers = Object.entries(req.headers)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('\r\n');
+    upstream.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n${headers}\r\n\r\n`);
+    if (head && head.length) upstream.write(head);
+    upstream.pipe(socket);
+    socket.pipe(upstream);
+  });
+  upstream.on('error', () => socket.destroy());
+  socket.on('error', () => upstream.destroy());
 });

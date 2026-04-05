@@ -53,12 +53,13 @@ ai.customer.com  CNAME  clawstack.yourdomain.com
 git clone https://github.com/magnusfroste/clawstack.git
 cd clawstack
 cp .env.example .env
-# Edit .env with your domain, email and admin password
-mkdir -p /opt/clawstack/instances
+# Edit .env — set BASE_DOMAIN, CADDY_EMAIL, ADMIN_PASS, PAPERCLIP_DOMAIN
 docker compose up -d
 ```
 
 Open `https://clawstack.yourdomain.com` and log in.
+
+> **Note:** Instance data is stored in `./instances/` relative to the project directory. No extra directories to create.
 
 ## Adding an OpenClaw instance
 
