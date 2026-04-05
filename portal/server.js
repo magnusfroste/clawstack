@@ -1128,6 +1128,7 @@ app.get('/', requireAdmin, (req, res) => {
           <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','files','${esc(i.image || OPENCLAW_IMAGE)}')">Files</button>
           <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','logs','${esc(i.image || OPENCLAW_IMAGE)}')">Logs</button>
           <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','cli','${esc(i.image || OPENCLAW_IMAGE)}')">CLI</button>
+          <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','version','${esc(i.image || OPENCLAW_IMAGE)}')">Version</button>
           <div class="divider"></div>
           <button class="btn amber sm" onclick="rowAction('${esc(i.name)}','restart')" title="Restart">↺</button>
           <button class="btn ghost sm" id="stopstart-${i.name}" onclick="rowAction('${esc(i.name)}','${i.status === 'running' ? 'stop' : 'start'}')">${i.status === 'running' ? '■' : '▶'}</button>
@@ -1202,9 +1203,12 @@ app.get('/', requireAdmin, (req, res) => {
           <code id="version-current" style="font-size:0.82rem;color:var(--text2);background:var(--surface2);padding:4px 10px;border-radius:4px;display:inline-block"></code>
         </div>
         <div>
-          <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">New image</div>
-          <input id="version-input" class="term-cmd" style="max-width:520px" placeholder="ghcr.io/openclaw/openclaw:2026.4.1" autocomplete="off" spellcheck="false">
-          <div style="font-size:0.7rem;color:var(--text3);margin-top:5px">Full image reference, e.g. <code style="color:var(--text2)">ghcr.io/openclaw/openclaw:2026.4.1</code> or <code style="color:var(--text2)">ghcr.io/openclaw/openclaw:latest</code></div>
+          <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">New version tag</div>
+          <div style="display:flex;align-items:center;gap:0;max-width:520px">
+            <span id="version-base" style="font-size:0.82rem;color:var(--text3);background:var(--surface2);border:1px solid var(--border);border-right:none;padding:6px 10px;border-radius:var(--radius-sm) 0 0 var(--radius-sm);white-space:nowrap;font-family:monospace"></span>
+            <input id="version-input" class="term-cmd" style="border-radius:0 var(--radius-sm) var(--radius-sm) 0;min-width:0;flex:1" placeholder="2026.4.2" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="font-size:0.7rem;color:var(--text3);margin-top:5px">Enter just the version tag, e.g. <code style="color:var(--text2)">2026.4.2</code> or <code style="color:var(--text2)">latest</code></div>
         </div>
         <div style="display:flex;align-items:center;gap:12px">
           <button id="version-btn" class="btn primary sm" onclick="recreateInstance()">Pull &amp; Recreate</button>
@@ -1342,7 +1346,11 @@ app.get('/', requireAdmin, (req, res) => {
       } else if(tab==='version'){
         document.getElementById('mgr-crumb').textContent='OpenClaw version management';
         document.getElementById('version-current').textContent=mgrImage||'unknown';
-        document.getElementById('version-input').value=mgrImage||'';
+        const colonIdx=(mgrImage||'').lastIndexOf(':');
+        const imgBase=colonIdx>0?(mgrImage||'').slice(0,colonIdx+1):'';
+        const imgTag=colonIdx>0?(mgrImage||'').slice(colonIdx+1):(mgrImage||'');
+        document.getElementById('version-base').textContent=imgBase;
+        document.getElementById('version-input').value=imgTag;
         document.getElementById('version-status').textContent='';
       } else {
         document.getElementById('mgr-crumb').textContent='Root shell (docker exec --user root)';
@@ -1515,8 +1523,11 @@ app.get('/', requireAdmin, (req, res) => {
     }
 
     async function recreateInstance(){
-      const image=document.getElementById('version-input').value.trim();
-      if(!image){document.getElementById('version-status').textContent='Enter an image first';return;}
+      const tag=document.getElementById('version-input').value.trim();
+      if(!tag){document.getElementById('version-status').textContent='Enter a version tag first';return;}
+      const base=document.getElementById('version-base').textContent;
+      // If user typed a full image ref (contains /), use as-is; otherwise combine base + tag
+      const image=(tag.includes('/')||!base)?tag:base+tag;
       const btn=document.getElementById('version-btn');
       const st=document.getElementById('version-status');
       btn.disabled=true;
