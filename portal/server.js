@@ -33,6 +33,8 @@ db.exec(`
 `);
 // Migration: add role column if missing
 try { db.exec(`ALTER TABLE instances ADD COLUMN role TEXT DEFAULT 'generalist'`); } catch {}
+// Migration: add image column if missing
+try { db.exec(`ALTER TABLE instances ADD COLUMN image TEXT`); } catch {}
 
 // --- Reverse proxy: MUST be first — routes customer domains before any admin middleware ---
 const proxyCache = {};
@@ -203,7 +205,7 @@ app.get('/api/verify-domain', (req, res) => {
 
 // --- API ---
 app.get('/api/instances', requireAdmin, (req, res) => {
-  const rows = db.prepare('SELECT id, name, domain, container_name, provider, model, status, created_at FROM instances ORDER BY created_at DESC').all();
+  const rows = db.prepare('SELECT id, name, domain, container_name, provider, model, status, image, created_at FROM instances ORDER BY created_at DESC').all();
   rows.forEach(row => {
     try {
       const cfg = JSON.parse(fs.readFileSync(path.join(INSTANCES_DIR, row.name, 'config', 'openclaw.json'), 'utf8'));
@@ -215,7 +217,7 @@ app.get('/api/instances', requireAdmin, (req, res) => {
 });
 
 app.post('/api/instances', requireAdmin, async (req, res) => {
-  const { name, domain, provider, model, baseUrl, enableA2A, role } = req.body;
+  const { name, domain, provider, model, baseUrl, enableA2A, role, image } = req.body;
   const apiKey = NO_KEY_PROVIDERS.has(provider) ? (req.body.apiKey || 'none') : req.body.apiKey;
   if (!name || !domain || !provider || !model || (!NO_KEY_PROVIDERS.has(provider) && !apiKey))
     return res.status(400).json({ error: 'name, domain, provider, model required (and apiKey for this provider)' });
@@ -224,9 +226,10 @@ app.post('/api/instances', requireAdmin, async (req, res) => {
 
   const containerName = `clawstack-${name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
   const token = crypto.randomBytes(32).toString('hex');
+  const instanceImage = (image || OPENCLAW_IMAGE).trim();
 
   try {
-    db.prepare('INSERT INTO instances (name, domain, container_name, token, provider, model, role) VALUES (?, ?, ?, ?, ?, ?, ?)').run(name, domain.toLowerCase(), containerName, token, provider, model, role || 'generalist');
+    db.prepare('INSERT INTO instances (name, domain, container_name, token, provider, model, role, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(name, domain.toLowerCase(), containerName, token, provider, model, role || 'generalist', instanceImage);
   } catch (e) {
     return res.status(400).json({ error: 'name or domain already exists' });
   }
@@ -241,7 +244,7 @@ app.post('/api/instances', requireAdmin, async (req, res) => {
   try {
     const container = await docker.createContainer({
       name: containerName,
-      Image: OPENCLAW_IMAGE,
+      Image: instanceImage,
       Env: [
         `OPENCLAW_GATEWAY_TOKEN=${token}`,
         `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=true`,
@@ -281,6 +284,75 @@ app.delete('/api/instances/:name', requireAdmin, async (req, res) => {
 
   db.prepare('DELETE FROM instances WHERE name = ?').run(req.params.name);
   res.json({ success: true });
+});
+
+// --- Recreate container with a new image ---
+app.post('/api/instances/:name/recreate', requireAdmin, async (req, res) => {
+  const row = db.prepare('SELECT * FROM instances WHERE name = ?').get(req.params.name);
+  if (!row) return res.status(404).json({ error: 'not found' });
+
+  const newImage = (req.body.image || row.image || OPENCLAW_IMAGE).trim();
+
+  // Grab API key from existing container env before stopping
+  let apiKey = '';
+  try {
+    const info = await docker.getContainer(row.container_name).inspect();
+    const envEntry = (info.Config.Env || []).find(e => e.startsWith('OPENCLAW_PROVIDER_API_KEY='));
+    if (envEntry) apiKey = envEntry.slice('OPENCLAW_PROVIDER_API_KEY='.length);
+  } catch { /* container may already be gone */ }
+
+  // Stop and remove old container
+  try {
+    const c = docker.getContainer(row.container_name);
+    await c.stop().catch(() => {});
+    await c.remove().catch(() => {});
+  } catch { /* already gone */ }
+
+  // Pull new image
+  try {
+    await new Promise((resolve, reject) => {
+      docker.pull(newImage, (err, stream) => {
+        if (err) return reject(err);
+        docker.modem.followProgress(stream, err => err ? reject(err) : resolve());
+      });
+    });
+  } catch (e) {
+    return res.status(500).json({ error: `Pull failed: ${e.message}` });
+  }
+
+  // Update DB
+  db.prepare('UPDATE instances SET image = ?, status = ? WHERE name = ?').run(newImage, 'starting', row.name);
+
+  // Recreate and start container
+  try {
+    const container = await docker.createContainer({
+      name: row.container_name,
+      Image: newImage,
+      Env: [
+        `OPENCLAW_GATEWAY_TOKEN=${row.token}`,
+        `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=true`,
+        `OPENCLAW_PROVIDER_API_KEY=${apiKey}`,
+        `TZ=${process.env.TZ || 'Europe/Stockholm'}`,
+      ],
+      HostConfig: {
+        NetworkMode: 'clawstack',
+        RestartPolicy: { Name: 'unless-stopped' },
+        Memory: 900 * 1024 * 1024,
+        MemorySwap: 1200 * 1024 * 1024,
+        CpuQuota: 150000,
+        Binds: [
+          `${INSTANCES_HOST_DIR}/${row.name}/config:/home/node/.openclaw`,
+          `${INSTANCES_HOST_DIR}/${row.name}/workspace:/home/node/.openclaw/workspace`,
+        ],
+      },
+    });
+    await container.start();
+    db.prepare('UPDATE instances SET status = ? WHERE name = ?').run('running', row.name);
+    res.json({ success: true, image: newImage });
+  } catch (e) {
+    db.prepare('UPDATE instances SET status = ? WHERE name = ?').run('error', row.name);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // --- File Management API ---
@@ -1012,6 +1084,7 @@ app.get('/', requireAdmin, (req, res) => {
             <label>Model <span style="font-weight:400;color:var(--text3)">— starting model, change anytime in OpenClaw</span></label>
             <input name="model" id="model" value="${MODEL_PRESETS.openrouter}" required placeholder="provider/model-id">
           </div>
+          <div class="field full"><label>OpenClaw image</label><input name="image" id="image" value="${esc(OPENCLAW_IMAGE)}" placeholder="ghcr.io/openclaw/openclaw:2026.3.24" autocomplete="off"></div>
           <div class="field full" id="baseurl-row" style="display:none"><label>Base URL</label><input name="baseUrl" id="baseUrl" type="url" placeholder="http://localhost:11434/v1" autocomplete="off"></div>
           <div class="field full" id="apikey-row"><label>API Key</label><input name="apiKey" id="apiKey" type="password" placeholder="sk-..." autocomplete="off"></div>
           <div class="full" style="margin-top:4px;display:flex;align-items:center;justify-content:space-between;gap:1rem">
@@ -1043,6 +1116,7 @@ app.get('/', requireAdmin, (req, res) => {
             ${i.role && i.role !== 'generalist' ? `<span class="badge role">${esc(i.role)}</span>` : ''}
           </div>
           ${i.liveModel ? `<div class="inst-meta">${esc(i.liveModel)}</div>` : ''}
+          <div class="inst-meta" title="${esc(i.image || OPENCLAW_IMAGE)}">${esc((i.image || OPENCLAW_IMAGE).split(':')[1] || (i.image || OPENCLAW_IMAGE))}</div>
         </div>
         <a class="inst-domain" href="https://${esc(i.domain)}" target="_blank">${esc(i.domain)}</a>
         <div class="inst-token">
@@ -1051,9 +1125,9 @@ app.get('/', requireAdmin, (req, res) => {
         </div>
         <div class="divider"></div>
         <div class="inst-actions">
-          <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','files')">Files</button>
-          <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','logs')">Logs</button>
-          <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','cli')">CLI</button>
+          <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','files','${esc(i.image || OPENCLAW_IMAGE)}')">Files</button>
+          <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','logs','${esc(i.image || OPENCLAW_IMAGE)}')">Logs</button>
+          <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','cli','${esc(i.image || OPENCLAW_IMAGE)}')">CLI</button>
           <div class="divider"></div>
           <button class="btn amber sm" onclick="rowAction('${esc(i.name)}','restart')" title="Restart">↺</button>
           <button class="btn ghost sm" id="stopstart-${i.name}" onclick="rowAction('${esc(i.name)}','${i.status === 'running' ? 'stop' : 'start'}')">${i.status === 'running' ? '■' : '▶'}</button>
@@ -1081,10 +1155,11 @@ app.get('/', requireAdmin, (req, res) => {
     </div>
   </div>
   <div id="mgr-tabs">
-    <div class="tab active" id="tab-files" onclick="switchTab('files')">Files</div>
-    <div class="tab"        id="tab-logs"  onclick="switchTab('logs')">Logs</div>
-    <div class="tab"        id="tab-cli"   onclick="switchTab('cli')">CLI</div>
-    <div class="tab"        id="tab-exec"  onclick="switchTab('exec')">Exec (root)</div>
+    <div class="tab active" id="tab-files"   onclick="switchTab('files')">Files</div>
+    <div class="tab"        id="tab-logs"    onclick="switchTab('logs')">Logs</div>
+    <div class="tab"        id="tab-cli"     onclick="switchTab('cli')">CLI</div>
+    <div class="tab"        id="tab-exec"    onclick="switchTab('exec')">Exec (root)</div>
+    <div class="tab"        id="tab-version" onclick="switchTab('version')">Version</div>
   </div>
   <div id="mgr-body">
     <div id="mgr-tree"></div>
@@ -1117,6 +1192,26 @@ app.get('/', requireAdmin, (req, res) => {
           <span class="term-prefix" style="color:#f87171">#</span>
           <input id="exec-cmd" class="term-cmd" placeholder="apt-get install -y curl" autocomplete="off" spellcheck="false">
           <button id="exec-run" class="term-run" onclick="runExec()">Run</button>
+        </div>
+      </div>
+
+      <!-- Version panel -->
+      <div id="mgr-version" class="term-panel" style="padding:1.5rem 2rem;gap:1.25rem;overflow-y:auto">
+        <div>
+          <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Current image</div>
+          <code id="version-current" style="font-size:0.82rem;color:var(--text2);background:var(--surface2);padding:4px 10px;border-radius:4px;display:inline-block"></code>
+        </div>
+        <div>
+          <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">New image</div>
+          <input id="version-input" class="term-cmd" style="max-width:520px" placeholder="ghcr.io/openclaw/openclaw:2026.4.1" autocomplete="off" spellcheck="false">
+          <div style="font-size:0.7rem;color:var(--text3);margin-top:5px">Full image reference, e.g. <code style="color:var(--text2)">ghcr.io/openclaw/openclaw:2026.4.1</code> or <code style="color:var(--text2)">ghcr.io/openclaw/openclaw:latest</code></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <button id="version-btn" class="btn primary sm" onclick="recreateInstance()">Pull &amp; Recreate</button>
+          <span id="version-status" style="font-size:0.75rem;color:var(--text3)"></span>
+        </div>
+        <div style="font-size:0.72rem;color:var(--text3);line-height:1.6;max-width:520px;padding:8px 12px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">
+          Pulls the image, stops the container, removes it, and starts a fresh one with the same config and data. The API key is preserved from the existing container.
         </div>
       </div>
 
@@ -1204,10 +1299,10 @@ app.get('/', requireAdmin, (req, res) => {
     setInterval(pollStatus,15000);
 
     // ── Manager modal ──
-    let mgrName=null, mgrPath=null, mgrTab='files';
+    let mgrName=null, mgrPath=null, mgrTab='files', mgrImage=null;
 
-    function openMgr(name,tab='files'){
-      mgrName=name;mgrPath=null;
+    function openMgr(name,tab='files',image=''){
+      mgrName=name;mgrPath=null;mgrImage=image;
       document.getElementById('mgr-title').textContent=name;
       document.getElementById('mgr-editor').value='';
       document.getElementById('btn-save').disabled=true;
@@ -1226,11 +1321,12 @@ app.get('/', requireAdmin, (req, res) => {
 
     function switchTab(tab){
       mgrTab=tab;
-      ['files','logs','cli','exec'].forEach(t=>document.getElementById('tab-'+t).className='tab'+(tab===t?' active':''));
+      ['files','logs','cli','exec','version'].forEach(t=>document.getElementById('tab-'+t).className='tab'+(tab===t?' active':''));
       document.getElementById('mgr-editor').style.display=tab==='files'?'':'none';
       document.getElementById('mgr-logs').style.display=tab==='logs'?'block':'none';
       document.getElementById('mgr-cli').style.display=tab==='cli'?'flex':'none';
       document.getElementById('mgr-exec').style.display=tab==='exec'?'flex':'none';
+      document.getElementById('mgr-version').style.display=tab==='version'?'flex':'none';
       document.getElementById('btn-save').style.display=tab==='files'?'':'none';
       document.getElementById('btn-refresh-logs').style.display=tab==='logs'?'':'none';
       document.getElementById('mgr-tree').style.display=tab==='files'?'':'none';
@@ -1243,6 +1339,11 @@ app.get('/', requireAdmin, (req, res) => {
       } else if(tab==='cli'){
         document.getElementById('mgr-crumb').textContent='OpenClaw CLI (node user)';
         setTimeout(()=>document.getElementById('cli-cmd').focus(),50);
+      } else if(tab==='version'){
+        document.getElementById('mgr-crumb').textContent='OpenClaw version management';
+        document.getElementById('version-current').textContent=mgrImage||'unknown';
+        document.getElementById('version-input').value=mgrImage||'';
+        document.getElementById('version-status').textContent='';
       } else {
         document.getElementById('mgr-crumb').textContent='Root shell (docker exec --user root)';
       }
@@ -1411,6 +1512,31 @@ app.get('/', requireAdmin, (req, res) => {
       await refreshMgrBadge();
       s.textContent='Done';
       setTimeout(()=>s.textContent='',2500);
+    }
+
+    async function recreateInstance(){
+      const image=document.getElementById('version-input').value.trim();
+      if(!image){document.getElementById('version-status').textContent='Enter an image first';return;}
+      const btn=document.getElementById('version-btn');
+      const st=document.getElementById('version-status');
+      btn.disabled=true;
+      st.textContent='Pulling image… this may take a minute';
+      const d=await api('POST','/api/instances/'+mgrName+'/recreate',{image});
+      btn.disabled=false;
+      if(d.error){
+        st.textContent='Error: '+d.error;
+        st.style.color='var(--red)';
+      } else {
+        mgrImage=d.image;
+        document.getElementById('version-current').textContent=d.image;
+        st.textContent='Done — container running new image';
+        st.style.color='var(--green)';
+        await refreshMgrBadge();
+        // Update badge on main list too
+        const badge=document.getElementById('badge-'+mgrName);
+        if(badge){const s=await api('GET','/api/instances/'+mgrName+'/status');badge.textContent=s.status;badge.className='badge '+(s.status||'error');}
+        setTimeout(()=>{st.textContent='';st.style.color='';},4000);
+      }
     }
 
     // Tab key inserts 2 spaces
