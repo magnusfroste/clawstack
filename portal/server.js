@@ -141,8 +141,61 @@ const PROVIDER_CONFIGS = {
   private:     { baseUrl: '',                                                         api: 'openai-completions' },
 };
 
+// --- Claw defaults (admin-editable, persisted in portal_data volume) ---
+const CLAW_DEFAULTS_FILE = '/data/claw-defaults.json';
+const BASELINE_CLAW_DEFAULTS = {
+  agents: {
+    defaults: {
+      maxConcurrent: 4,
+      subagents: { maxConcurrent: 8 },
+      compaction: {
+        mode: 'default',
+        reserveTokensFloor: 40000,
+      },
+      contextPruning: {
+        mode: 'cache-ttl',
+        ttl: '45m',
+        keepLastAssistants: 2,
+        minPrunableToolChars: 12000,
+        hardClear: { enabled: true, placeholder: '[Old tool result cleared]' },
+      },
+    }
+  },
+  browser: { enabled: true, headless: true, noSandbox: true },
+  session: { dmScope: 'per-channel-peer' },
+};
+
+function loadClawDefaults() {
+  try { return JSON.parse(fs.readFileSync(CLAW_DEFAULTS_FILE, 'utf8')); } catch { return BASELINE_CLAW_DEFAULTS; }
+}
+
+function deepMerge(base, override) {
+  const out = { ...base };
+  for (const [k, v] of Object.entries(override)) {
+    if (v && typeof v === 'object' && !Array.isArray(v) && typeof base[k] === 'object' && !Array.isArray(base[k]))
+      out[k] = deepMerge(base[k], v);
+    else
+      out[k] = v;
+  }
+  return out;
+}
+
+app.get('/api/system/claw-defaults', requireAdmin, (req, res) => {
+  res.json({ content: JSON.stringify(loadClawDefaults(), null, 2) });
+});
+
+app.post('/api/system/claw-defaults', requireAdmin, (req, res) => {
+  const { content } = req.body;
+  if (typeof content !== 'string') return res.status(400).json({ error: 'content required' });
+  try {
+    JSON.parse(content); // validate
+    fs.writeFileSync(CLAW_DEFAULTS_FILE, content, 'utf8');
+    res.json({ success: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // --- Bootstrap: write OpenClaw config files before container starts ---
-function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl, enableA2A, role }) {
+function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl, enableA2A, role, allowAll }) {
   const configDir = path.join(INSTANCES_DIR, name, 'config');
   const agentDir = path.join(configDir, 'agents', 'main', 'agent');
   const sessionsDir = path.join(configDir, 'agents', 'main', 'sessions');
@@ -192,8 +245,8 @@ function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseU
   const providerConf = PROVIDER_CONFIGS[provider] || { baseUrl: '', api: 'openai-completions' };
   if (baseUrl) providerConf.baseUrl = baseUrl;
 
-  // 1. openclaw.json — all config in one file (models.providers is where OpenClaw reads API keys)
-  fs.writeFileSync(path.join(configDir, 'openclaw.json'), JSON.stringify({
+  // 1. openclaw.json — merge admin defaults with instance-specific config
+  const instanceConfig = {
     meta: {
       lastTouchedVersion: '2026.3.24',
       lastTouchedAt: new Date().toISOString(),
@@ -209,27 +262,20 @@ function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseU
       }
     },
     agents: {
-      defaults: {
-        model: { primary: fullModelRef },
-        maxConcurrent: 4,
-        subagents: { maxConcurrent: 8 },
-      }
+      defaults: { model: { primary: fullModelRef } }
+    },
+    tools: {
+      exec: { ask: allowAll ? 'off' : 'always' }
     },
     gateway: {
       mode: 'local',
       bind: 'lan',
       remote: { url: `https://${domain}` },
       auth: { token: token },
-      http: {
-        endpoints: {
-          responses: { enabled: true }
-        }
-      },
+      trustedProxies: '172.16.0.0/12',
+      http: { endpoints: { responses: { enabled: true } } },
       controlUi: {
-        allowedOrigins: [
-          'http://localhost:18789',
-          `https://${domain}`
-        ],
+        allowedOrigins: ['http://localhost:18789', `https://${domain}`],
         dangerouslyDisableDeviceAuth: true
       }
     },
@@ -250,7 +296,9 @@ function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseU
         }
       }
     } : {}),
-  }, null, 2));
+  };
+  const merged = deepMerge(loadClawDefaults(), instanceConfig);
+  fs.writeFileSync(path.join(configDir, 'openclaw.json'), JSON.stringify(merged, null, 2));
 }
 
 // --- Caddy on-demand TLS verification ---
@@ -275,7 +323,7 @@ app.get('/api/instances', requireAdmin, (req, res) => {
 });
 
 app.post('/api/instances', requireAdmin, async (req, res) => {
-  const { name, domain, provider, model, baseUrl, enableA2A, role, image } = req.body;
+  const { name, domain, provider, model, baseUrl, enableA2A, role, image, allowAll } = req.body;
   const apiKey = NO_KEY_PROVIDERS.has(provider) ? (req.body.apiKey || 'none') : req.body.apiKey;
   if (!name || !domain || !provider || !model || (!NO_KEY_PROVIDERS.has(provider) && !apiKey))
     return res.status(400).json({ error: 'name, domain, provider, model required (and apiKey for this provider)' });
@@ -293,7 +341,7 @@ app.post('/api/instances', requireAdmin, async (req, res) => {
   }
 
   try {
-    bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl, enableA2A: !!enableA2A, role: role || 'generalist' });
+    bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl, enableA2A: !!enableA2A, role: role || 'generalist', allowAll: !!allowAll });
   } catch (e) {
     db.prepare('DELETE FROM instances WHERE name = ?').run(name);
     return res.status(500).json({ error: `Bootstrap failed: ${e.message}` });
@@ -415,7 +463,7 @@ app.post('/api/instances/:name/recreate', requireAdmin, async (req, res) => {
 
 // --- File Management API ---
 function resolveInstancePath(instanceName, relPath) {
-  const base = path.join(INSTANCES_DIR, instanceName, 'config');
+  const base = path.join(INSTANCES_DIR, instanceName);
   const full = path.resolve(base, relPath || '');
   if (full !== base && !full.startsWith(base + path.sep))
     throw new Error('Path traversal not allowed');
@@ -454,6 +502,46 @@ app.post('/api/instances/:name/files', requireAdmin, (req, res) => {
     fs.chownSync(full, 1000, 1000);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- Backup / Restore ---
+app.get('/api/instances/:name/backup', requireAdmin, (req, res) => {
+  if (!db.prepare('SELECT id FROM instances WHERE name = ?').get(req.params.name))
+    return res.status(404).json({ error: 'not found' });
+  const dir = path.join(INSTANCES_DIR, req.params.name);
+  if (!fs.existsSync(dir)) return res.status(404).json({ error: 'instance directory not found' });
+  res.setHeader('Content-Type', 'application/gzip');
+  res.setHeader('Content-Disposition', `attachment; filename="${req.params.name}-backup.tar.gz"`);
+  const tar = require('child_process').spawn('tar', ['czf', '-', '-C', path.dirname(dir), path.basename(dir)]);
+  tar.stdout.pipe(res);
+  tar.stderr.on('data', d => console.error('backup tar:', d.toString()));
+  tar.on('error', err => { if (!res.headersSent) res.status(500).json({ error: err.message }); });
+});
+
+app.post('/api/instances/:name/restore', requireAdmin, express.raw({ type: '*/*', limit: '500mb' }), async (req, res) => {
+  const row = db.prepare('SELECT container_name FROM instances WHERE name = ?').get(req.params.name);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'no file uploaded' });
+  const dir = path.join(INSTANCES_DIR, req.params.name);
+  const tmpFile = path.join('/tmp', `${req.params.name}-restore.tar.gz`);
+  try {
+    fs.writeFileSync(tmpFile, req.body);
+    const container = docker.getContainer(row.container_name);
+    await container.stop().catch(() => {});
+    // Wipe and re-extract
+    const { execFileSync } = require('child_process');
+    execFileSync('rm', ['-rf', path.join(dir, 'config'), path.join(dir, 'workspace')]);
+    fs.mkdirSync(dir, { recursive: true });
+    execFileSync('tar', ['xzf', tmpFile, '--strip-components=1', '-C', dir]);
+    execFileSync('chown', ['-R', '1000:1000', dir]);
+    await container.start();
+    db.prepare('UPDATE instances SET status = ? WHERE container_name = ?').run('running', row.container_name);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  } finally {
+    fs.unlink(tmpFile, () => {});
+  }
 });
 
 // --- Container Actions ---
@@ -1533,10 +1621,16 @@ app.get('/', requireAdmin, (req, res) => {
           <div class="field full" id="baseurl-row" style="display:none"><label>Base URL</label><input name="baseUrl" id="baseUrl" type="url" placeholder="http://localhost:11434/v1" autocomplete="off"></div>
           <div class="field full" id="apikey-row"><label>API Key</label><input name="apiKey" id="apiKey" type="password" placeholder="sk-..." autocomplete="off"></div>
           <div class="full" style="margin-top:4px;display:flex;align-items:center;justify-content:space-between;gap:1rem">
-            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:0.78rem;color:var(--text3);text-transform:none;letter-spacing:0;font-weight:400">
-              <input type="checkbox" name="enableA2A" value="1" style="width:auto;accent-color:var(--blue)">
-              Enable A2A (agent-to-agent protocol)
-            </label>
+            <div style="display:flex;gap:1.25rem">
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:0.78rem;color:var(--text3);text-transform:none;letter-spacing:0;font-weight:400">
+                <input type="checkbox" name="enableA2A" value="1" style="width:auto;accent-color:var(--blue)">
+                Enable A2A (agent-to-agent protocol)
+              </label>
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:0.78rem;color:var(--text3);text-transform:none;letter-spacing:0;font-weight:400" title="Allow everything: bot acts immediately without asking (YOLO mode)">
+                <input type="checkbox" name="allowAll" value="1" style="width:auto;accent-color:var(--blue)">
+                Allow all actions (YOLO mode)
+              </label>
+            </div>
             <button type="submit" class="btn primary">Create instance</button>
           </div>
         </div>
@@ -1654,13 +1748,14 @@ app.get('/', requireAdmin, (req, res) => {
         <button class="cfg-tab active" id="cfg-tab-env"          onclick="cfgLoad('.env')">          .env</button>
         <button class="cfg-tab"        id="cfg-tab-compose"      onclick="cfgLoad('docker-compose.yml')">docker-compose.yml</button>
         <button class="cfg-tab"        id="cfg-tab-caddyfile"    onclick="cfgLoad('Caddyfile')">     Caddyfile</button>
+        <button class="cfg-tab"        id="cfg-tab-clawdefaults" onclick="cfgLoad('claw-defaults')"> Claw defaults</button>
       </div>
       <textarea id="cfg-editor" class="cfg-editor" spellcheck="false"></textarea>
       <div class="cfg-footer">
         <button class="btn sm" onclick="cfgSave()" id="cfg-save-btn">Save</button>
         <span id="cfg-status" style="font-size:0.75rem;color:var(--text3)"></span>
         <span style="flex:1"></span>
-        <span style="font-size:0.7rem;color:var(--text3)">Changes to compose/.env require <code style="color:var(--text2)">docker compose up -d</code> to take effect</span>
+        <span id="cfg-footer-hint" style="font-size:0.7rem;color:var(--text3)">Changes to compose/.env require <code style="color:var(--text2)">docker compose up -d</code> to take effect</span>
       </div>
     </div>
   </div>
@@ -1768,6 +1863,7 @@ app.get('/', requireAdmin, (req, res) => {
           <button onclick="cliShortcut('openclaw config get')">config get</button>
           <button onclick="cliShortcut('openclaw doctor')">doctor</button>
           <button onclick="cliShortcut('openclaw --version')">version</button>
+          <button onclick="cliShortcut('npx playwright install chromium')" title="Download Chromium (~170 MB) — required for browser tool">install browser</button>
         </div>
         <div id="cli-output" class="term-output"># OpenClaw CLI — node user (uid 1000)\n</div>
         <div class="term-input-row">
@@ -1814,6 +1910,9 @@ app.get('/', requireAdmin, (req, res) => {
         <button id="btn-save" class="btn sm" onclick="saveFile()" disabled>Save</button>
         <button id="btn-refresh-logs" class="btn ghost sm" style="display:none" onclick="loadLogs()">↻ Refresh</button>
         <button id="btn-copy-logs"   class="btn ghost sm" style="display:none" onclick="copyLogs()">⎘ Copy</button>
+        <button id="btn-backup"  class="btn ghost sm" style="display:none" onclick="downloadBackup()">⬇ Backup</button>
+        <button id="btn-restore" class="btn ghost sm" style="display:none" onclick="document.getElementById('restore-input').click()">⬆ Restore</button>
+        <input id="restore-input" type="file" accept=".tar.gz,.tgz" style="display:none" onchange="uploadRestore(this)">
         <span id="mgr-status"></span>
       </div>
     </div>
@@ -1903,6 +2002,7 @@ app.get('/', requireAdmin, (req, res) => {
       document.getElementById('mgr-editor').value='';
       document.getElementById('btn-save').disabled=true;
       document.getElementById('mgr-status').textContent='';
+      document.getElementById('mgr-tree').innerHTML='';
       document.getElementById('mgr').classList.add('open');
       refreshMgrBadge();
       switchTab(tab);
@@ -1926,6 +2026,8 @@ app.get('/', requireAdmin, (req, res) => {
       document.getElementById('btn-save').style.display=tab==='files'?'':'none';
       document.getElementById('btn-refresh-logs').style.display=tab==='logs'?'':'none';
       document.getElementById('btn-copy-logs').style.display=tab==='logs'?'':'none';
+      document.getElementById('btn-backup').style.display=tab==='files'?'':'none';
+      document.getElementById('btn-restore').style.display=tab==='files'?'':'none';
       document.getElementById('mgr-tree').style.display=tab==='files'?'':'none';
       if(tab==='files'){
         if(!document.getElementById('mgr-tree').children.length) loadTree('');
@@ -2023,6 +2125,39 @@ app.get('/', requireAdmin, (req, res) => {
       document.getElementById('btn-save').disabled=false;
       document.getElementById('mgr-status').textContent=d.success?'Saved ✓':('Error: '+d.error);
       if(d.success) setTimeout(()=>document.getElementById('mgr-status').textContent='',2500);
+    }
+
+    function downloadBackup(){
+      const a=document.createElement('a');
+      a.href='/api/instances/'+mgrName+'/backup';
+      a.download=mgrName+'-backup.tar.gz';
+      // Attach auth header via fetch + blob since Basic auth isn't sent with <a>
+      const st=document.getElementById('mgr-status');
+      st.textContent='Preparing backup…';
+      fetch(a.href,{headers:{Authorization:__auth}})
+        .then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.blob();})
+        .then(blob=>{
+          const url=URL.createObjectURL(blob);
+          a.href=url;a.click();URL.revokeObjectURL(url);
+          st.textContent='';
+        }).catch(e=>{st.textContent='Backup failed: '+e.message;});
+    }
+
+    async function uploadRestore(input){
+      const file=input.files[0];input.value='';
+      if(!file) return;
+      const st=document.getElementById('mgr-status');
+      if(!confirm('Restore will stop the container, replace all files, then restart. Continue?')) return;
+      st.textContent='Uploading…';
+      try {
+        const r=await fetch('/api/instances/'+mgrName+'/restore',{method:'POST',headers:{Authorization:__auth,'Content-Type':'application/octet-stream'},body:file});
+        const d=await r.json();
+        if(d.success){
+          st.textContent='Restored ✓ — restarting…';
+          document.getElementById('mgr-tree').innerHTML='';
+          setTimeout(()=>{loadTree('');refreshMgrBadge();st.textContent='';},2500);
+        } else { st.textContent='Restore failed: '+d.error; }
+      } catch(e){ st.textContent='Restore failed: '+e.message; }
     }
 
     async function copyLogs(){
@@ -2380,7 +2515,13 @@ app.get('/', requireAdmin, (req, res) => {
 
     // ── Config editor ──
     let cfgCurrentFile = '.env';
-    const cfgTabMap = { '.env': 'cfg-tab-env', 'docker-compose.yml': 'cfg-tab-compose', 'Caddyfile': 'cfg-tab-caddyfile' };
+    const cfgTabMap = { '.env': 'cfg-tab-env', 'docker-compose.yml': 'cfg-tab-compose', 'Caddyfile': 'cfg-tab-caddyfile', 'claw-defaults': 'cfg-tab-clawdefaults' };
+    const cfgHints = {
+      '.env': 'Changes to .env require <code style="color:var(--text2)">docker compose up -d</code> to take effect',
+      'docker-compose.yml': 'Changes to compose/.env require <code style="color:var(--text2)">docker compose up -d</code> to take effect',
+      'Caddyfile': 'Caddy reloads automatically when the Caddyfile is saved',
+      'claw-defaults': 'Applied to all new instances at creation time — existing instances are not affected',
+    };
 
     async function cfgLoad(file) {
       cfgCurrentFile = file;
@@ -2389,7 +2530,9 @@ app.get('/', requireAdmin, (req, res) => {
       const editor = document.getElementById('cfg-editor');
       editor.value = 'Loading…';
       document.getElementById('cfg-status').textContent = '';
-      const d = await api('GET', '/api/system/config/' + encodeURIComponent(file));
+      document.getElementById('cfg-footer-hint').innerHTML = cfgHints[file] || '';
+      const url = file === 'claw-defaults' ? '/api/system/claw-defaults' : '/api/system/config/' + encodeURIComponent(file);
+      const d = await api('GET', url);
       editor.value = d.error ? ('Error: ' + d.error) : d.content;
     }
 
@@ -2397,8 +2540,9 @@ app.get('/', requireAdmin, (req, res) => {
       const btn = document.getElementById('cfg-save-btn');
       const st  = document.getElementById('cfg-status');
       btn.disabled = true;
-      const d = await api('POST', '/api/system/config/' + encodeURIComponent(cfgCurrentFile),
-        { content: document.getElementById('cfg-editor').value });
+      const content = document.getElementById('cfg-editor').value;
+      const url = cfgCurrentFile === 'claw-defaults' ? '/api/system/claw-defaults' : '/api/system/config/' + encodeURIComponent(cfgCurrentFile);
+      const d = await api('POST', url, { content });
       btn.disabled = false;
       if (d.error) { st.style.color = 'var(--red)'; st.textContent = 'Error: ' + d.error; }
       else { st.style.color = 'var(--green)'; st.textContent = 'Saved.'; setTimeout(() => st.textContent = '', 3000); }

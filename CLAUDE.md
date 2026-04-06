@@ -68,6 +68,12 @@ OpenClaw containers run as uid 1000; all written files are chowned accordingly.
 | `ADMIN_USER` / `ADMIN_PASS` | Portal basic auth credentials |
 | `OPENCLAW_IMAGE` | OpenClaw Docker image tag |
 | `TZ` | Timezone for containers |
+| `PAPERCLIP_DOMAIN` | Domain for the Paperclip orchestrator |
+| `PAPERCLIP_SECRETS_KEY` | `BETTER_AUTH_SECRET` for Paperclip (generate with `openssl rand -hex 32`) |
+| `ANTHROPIC_API_KEY` | Optional: Paperclip's built-in Claude access |
+| `CLAUDE_BASE_URL` / `CLAUDE_AUTH_TOKEN` / `CLAUDE_MODEL` | Optional: point Paperclip at a private LLM |
+
+`INSTANCES_HOST_DIR` is set automatically in `docker-compose.yml` to `$PWD/instances` (the host-side path). The portal uses it when bind-mounting instance dirs into OpenClaw containers.
 
 ### Two communication channels
 
@@ -78,4 +84,12 @@ See `docs/DUAL-CHANNEL.md` for when to use which.
 
 ### Paperclip
 
-`docker-compose.yml` also runs `paperclip` (a separate orchestration product) and its Postgres DB. These are independent of ClawStack's core instance management. The Caddyfile hard-codes `boss.froste.eu` as the Paperclip domain.
+`docker-compose.yml` also runs `paperclip` (a separate orchestration product) and its Postgres DB. These are independent of ClawStack's core instance management. The Paperclip domain is set via `PAPERCLIP_DOMAIN` in `.env` and picked up by the Caddyfile.
+
+`server.js` hardcodes the Paperclip container names as `clawstack-paperclip-1` and `clawstack-paperclip-db-1`. The Docker Compose project name must remain `clawstack` (the default when run from this directory) for those references to resolve correctly.
+
+### Gotchas
+
+- **Proxy cache:** `getProxy()` in `server.js` caches proxy instances by `containerName:port`. If a container is recreated (new IP), the cached proxy will keep hitting the old address until the portal is restarted.
+- **DB migrations:** New columns are added with bare `ALTER TABLE … ADD COLUMN` wrapped in try/catch at startup — there is no migration tool. Check these blocks when changing the schema.
+- **`disableDeviceAuth`:** The generated `openclaw.json` must include `disableDeviceAuth: true` to prevent Paperclip pairing from deadlocking on first boot.

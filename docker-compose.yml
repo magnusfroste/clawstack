@@ -38,6 +38,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - portal_data:/data
       - ${PWD}/instances:/instances
+      - /opt/clawstack/instances:/opt/clawstack/instances
       - .:/clawstack-config
     networks:
       - clawstack
