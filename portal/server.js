@@ -663,6 +663,94 @@ app.post('/api/instances/:name/cli', requireAdmin, async (req, res) => {
 });
 
 // --- Status API ---
+app.get('/api/instances/:name/model', requireAdmin, (req, res) => {
+  const row = db.prepare('SELECT name FROM instances WHERE name = ?').get(req.params.name);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(INSTANCES_DIR, req.params.name, 'config', 'openclaw.json'), 'utf8'));
+    const primary = cfg?.agents?.defaults?.model?.primary || '';
+    const providers = cfg?.models?.providers || {};
+    const providerKey = Object.keys(providers)[0] || '';
+    const providerCfg = providers[providerKey] || {};
+    const apiKey = providerCfg.apiKey || '';
+    res.json({
+      provider: providerKey,
+      model: primary.includes('/') ? primary.split('/').slice(1).join('/') : primary,
+      baseUrl: providerCfg.baseUrl || '',
+      hasApiKey: !!apiKey && !apiKey.startsWith('${'),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/instances/:name/model', requireAdmin, async (req, res) => {
+  const row = db.prepare('SELECT name, container_name FROM instances WHERE name = ?').get(req.params.name);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  const { provider, model, apiKey, baseUrl } = req.body;
+  if (!provider || !model) return res.status(400).json({ error: 'provider and model required' });
+  try {
+    const cfgPath = path.join(INSTANCES_DIR, req.params.name, 'config', 'openclaw.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    const providerConf = PROVIDER_CONFIGS[provider] || { baseUrl: baseUrl || '', api: 'openai-completions' };
+    if (baseUrl) providerConf.baseUrl = baseUrl;
+    // Replace provider config (keep only the new provider)
+    cfg.models = cfg.models || {};
+    cfg.models.providers = {
+      [provider]: {
+        ...providerConf,
+        apiKey: apiKey || cfg.models?.providers?.[provider]?.apiKey || '${OPENCLAW_PROVIDER_API_KEY}',
+        models: [{ id: model, name: model }],
+      }
+    };
+    cfg.agents = cfg.agents || {};
+    cfg.agents.defaults = cfg.agents.defaults || {};
+    cfg.agents.defaults.model = { primary: `${provider}/${model}` };
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf8');
+    fs.chownSync(cfgPath, 1000, 1000);
+    // Restart container
+    const container = docker.getContainer(row.container_name);
+    await container.restart();
+    db.prepare('UPDATE instances SET provider = ?, model = ? WHERE name = ?').run(provider, model, row.name);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- Chat proxy (streams SSE from OpenClaw /v1/responses) ---
+app.post('/api/instances/:name/chat', requireAdmin, (req, res) => {
+  const row = db.prepare('SELECT container_name, token FROM instances WHERE name = ?').get(req.params.name);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  const { messages } = req.body;
+  if (!Array.isArray(messages) || !messages.length) return res.status(400).json({ error: 'messages required' });
+
+  const body = Buffer.from(JSON.stringify({ model: 'openclaw', input: messages, stream: true }));
+  const opts = {
+    hostname: row.container_name,
+    port: 18789,
+    path: '/v1/responses',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${row.token}`,
+      'Content-Length': body.length,
+    },
+  };
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  const proxyReq = require('http').request(opts, proxyRes => {
+    proxyRes.on('data', chunk => res.write(chunk));
+    proxyRes.on('end', () => res.end());
+  });
+  proxyReq.on('error', err => {
+    if (!res.headersSent) res.status(502).json({ error: err.message });
+    else res.end();
+  });
+  proxyReq.write(body);
+  proxyReq.end();
+});
+
+
 app.get('/api/instances/:name/status', requireAdmin, async (req, res) => {
   const row = db.prepare('SELECT container_name FROM instances WHERE name = ?').get(req.params.name);
   if (!row) return res.status(404).json({ error: 'not found' });
@@ -1525,6 +1613,12 @@ app.get('/', requireAdmin, (req, res) => {
     .pp-status-row{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:1.5rem}
     .pp-status-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.25rem;display:flex;flex-direction:column;gap:4px}
     .pp-status-label{font-size:0.65rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.08em}
+    .chat-bubble{max-width:80%;padding:8px 12px;border-radius:12px;font-size:0.85rem;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+    .chat-bubble.user{background:var(--blue);color:#fff;align-self:flex-end;border-bottom-right-radius:3px}
+    .chat-bubble.assistant{background:var(--surface2);color:var(--text);align-self:flex-start;border-bottom-left-radius:3px;border:1px solid var(--border)}
+    .chat-bubble.assistant.streaming{opacity:0.8}
+    .chat-role{font-size:0.65rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
+    .chat-msg{display:flex;flex-direction:column}
     .pp-status-val{font-size:0.95rem;font-weight:600;color:var(--text);display:flex;align-items:center;gap:6px}
     .pp-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
     .pp-dot.ok{background:var(--green);box-shadow:0 0 5px rgba(34,197,94,.4)}
@@ -1850,6 +1944,8 @@ app.get('/', requireAdmin, (req, res) => {
   <div id="mgr-tabs">
     <div class="tab active" id="tab-files"   onclick="switchTab('files')">Files</div>
     <div class="tab"        id="tab-logs"    onclick="switchTab('logs')">Logs</div>
+    <div class="tab"        id="tab-chat"    onclick="switchTab('chat')">Chat</div>
+    <div class="tab"        id="tab-model"   onclick="switchTab('model')">Model</div>
     <div class="tab"        id="tab-cli"     onclick="switchTab('cli')">CLI</div>
     <div class="tab"        id="tab-exec"    onclick="switchTab('exec')">Exec (root)</div>
     <div class="tab"        id="tab-version" onclick="switchTab('version')">Version</div>
@@ -1909,6 +2005,53 @@ app.get('/', requireAdmin, (req, res) => {
         </div>
         <div style="font-size:0.72rem;color:var(--text3);line-height:1.6;max-width:520px;padding:8px 12px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">
           Pulls the image, stops the container, removes it, and starts a fresh one with the same config and data. The API key is preserved from the existing container.
+        </div>
+      </div>
+
+      <!-- Chat panel -->
+      <div id="mgr-chat" style="display:none;flex-direction:column;height:100%;overflow:hidden">
+        <div id="chat-messages" style="flex:1;overflow-y:auto;padding:1rem 1.5rem;display:flex;flex-direction:column;gap:0.75rem"></div>
+        <div style="padding:0.75rem 1rem;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end">
+          <textarea id="chat-input" rows="2" placeholder="Message…" spellcheck="true"
+            style="flex:1;resize:none;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;color:var(--text);font-size:0.85rem;font-family:inherit;line-height:1.4"
+            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+          <button class="btn primary sm" onclick="sendChat()" id="chat-send" style="align-self:flex-end">Send</button>
+        </div>
+      </div>
+
+      <!-- Model panel -->
+      <div id="mgr-model" class="term-panel" style="padding:1.5rem 2rem;gap:1.25rem;overflow-y:auto">
+        <div style="display:flex;flex-direction:column;gap:1rem;max-width:520px">
+          <div>
+            <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Provider</div>
+            <select id="model-provider" style="width:100%;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem" onchange="onModelProviderChange()">
+              <option value="openrouter">OpenRouter</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="openai">OpenAI</option>
+              <option value="gemini">Gemini</option>
+              <option value="private">Private LLM</option>
+            </select>
+          </div>
+          <div id="model-baseurl-row" style="display:none">
+            <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Base URL</div>
+            <input id="model-baseurl" style="width:100%;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem;box-sizing:border-box" placeholder="https://your-llm-host/v1" autocomplete="off">
+          </div>
+          <div>
+            <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Model</div>
+            <input id="model-name" style="width:100%;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem;box-sizing:border-box" placeholder="e.g. openai/gpt-4o" autocomplete="off" spellcheck="false">
+            <div style="font-size:0.7rem;color:var(--text3);margin-top:4px">Full model ID as used by the provider</div>
+          </div>
+          <div>
+            <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">API Key</div>
+            <input id="model-apikey" type="password" style="width:100%;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem;box-sizing:border-box" placeholder="Leave blank to keep existing" autocomplete="off">
+          </div>
+          <div style="display:flex;align-items:center;gap:12px">
+            <button class="btn primary sm" onclick="saveModel()">Save &amp; Restart</button>
+            <span id="model-status" style="font-size:0.75rem;color:var(--text3)"></span>
+          </div>
+          <div style="font-size:0.72rem;color:var(--text3);line-height:1.6;padding:8px 12px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">
+            Updates <code style="color:var(--text2)">openclaw.json</code> and restarts the container. The new model takes effect immediately.
+          </div>
         </div>
       </div>
 
@@ -2009,6 +2152,7 @@ app.get('/', requireAdmin, (req, res) => {
       document.getElementById('btn-save').disabled=true;
       document.getElementById('mgr-status').textContent='';
       document.getElementById('mgr-tree').innerHTML='';
+      document.getElementById('chat-messages').innerHTML='';
       document.getElementById('mgr').classList.add('open');
       refreshMgrBadge();
       switchTab(tab);
@@ -2023,12 +2167,14 @@ app.get('/', requireAdmin, (req, res) => {
 
     function switchTab(tab){
       mgrTab=tab;
-      ['files','logs','cli','exec','version'].forEach(t=>document.getElementById('tab-'+t).className='tab'+(tab===t?' active':''));
+      ['files','logs','cli','exec','version','model','chat'].forEach(t=>document.getElementById('tab-'+t).className='tab'+(tab===t?' active':''));
       document.getElementById('mgr-editor').style.display=tab==='files'?'':'none';
       document.getElementById('mgr-logs').style.display=tab==='logs'?'block':'none';
       document.getElementById('mgr-cli').style.display=tab==='cli'?'flex':'none';
       document.getElementById('mgr-exec').style.display=tab==='exec'?'flex':'none';
       document.getElementById('mgr-version').style.display=tab==='version'?'flex':'none';
+      document.getElementById('mgr-model').style.display=tab==='model'?'flex':'none';
+      document.getElementById('mgr-chat').style.display=tab==='chat'?'flex':'none';
       document.getElementById('btn-save').style.display=tab==='files'?'':'none';
       document.getElementById('btn-refresh-logs').style.display=tab==='logs'?'':'none';
       document.getElementById('btn-copy-logs').style.display=tab==='logs'?'':'none';
@@ -2053,9 +2199,129 @@ app.get('/', requireAdmin, (req, res) => {
         document.getElementById('version-base').textContent=imgBase;
         document.getElementById('version-input').value=imgTag;
         document.getElementById('version-status').textContent='';
+      } else if(tab==='model'){
+        document.getElementById('mgr-crumb').textContent='Model configuration';
+        loadModel();
+      } else if(tab==='chat'){
+        document.getElementById('mgr-crumb').textContent='Chat';
       } else {
         document.getElementById('mgr-crumb').textContent='Root shell (docker exec --user root)';
       }
+    }
+
+    // ── Chat ──
+    const chatHistory = {}; // keyed by instance name
+    let chatStreaming = false;
+
+    function chatAddBubble(role, text, streaming=false){
+      const msgs = document.getElementById('chat-messages');
+      const wrap = document.createElement('div');
+      wrap.className = 'chat-msg';
+      const label = document.createElement('div');
+      label.className = 'chat-role';
+      label.textContent = role === 'user' ? 'You' : mgrName;
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble ' + role + (streaming?' streaming':'');
+      bubble.textContent = text;
+      wrap.appendChild(label);
+      wrap.appendChild(bubble);
+      msgs.appendChild(wrap);
+      msgs.scrollTop = msgs.scrollHeight;
+      return bubble;
+    }
+
+    async function sendChat(){
+      if(chatStreaming) return;
+      const input = document.getElementById('chat-input');
+      const text = input.value.trim();
+      if(!text) return;
+      input.value='';
+
+      if(!chatHistory[mgrName]) chatHistory[mgrName]=[];
+      chatHistory[mgrName].push({role:'user', content: text});
+      chatAddBubble('user', text);
+
+      const bubble = chatAddBubble('assistant','', true);
+      chatStreaming = true;
+      document.getElementById('chat-send').disabled = true;
+
+      let accumulated = '';
+      try {
+        const resp = await fetch('/api/instances/'+mgrName+'/chat', {
+          method:'POST',
+          headers:{Authorization:__auth,'Content-Type':'application/json'},
+          body: JSON.stringify({messages: chatHistory[mgrName]}),
+        });
+        if(!resp.ok || !resp.body) throw new Error('HTTP '+resp.status);
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while(true){
+          const {done, value} = await reader.read();
+          if(done) break;
+          buf += decoder.decode(value, {stream:true});
+          const lines = buf.split('\n');
+          buf = lines.pop();
+          for(const line of lines){
+            if(!line.startsWith('data:')) continue;
+            const raw = line.slice(5).trim();
+            if(raw === '[DONE]') continue;
+            try {
+              const ev = JSON.parse(raw);
+              if(ev.type === 'response.output_text.delta' && ev.delta){
+                accumulated += ev.delta;
+                bubble.textContent = accumulated;
+                document.getElementById('chat-messages').scrollTop = 999999;
+              } else if(ev.type === 'response.output_text.done' && ev.text && !accumulated){
+                accumulated = ev.text;
+                bubble.textContent = accumulated;
+              }
+            } catch {}
+          }
+        }
+      } catch(e) {
+        accumulated = '(Error: ' + e.message + ')';
+        bubble.textContent = accumulated;
+      }
+
+      bubble.classList.remove('streaming');
+      chatStreaming = false;
+      document.getElementById('chat-send').disabled = false;
+      if(accumulated) chatHistory[mgrName].push({role:'assistant', content: accumulated});
+      input.focus();
+    }
+
+    function onModelProviderChange(){
+      const p=document.getElementById('model-provider').value;
+      document.getElementById('model-baseurl-row').style.display=p==='private'?'':'none';
+    }
+
+    async function loadModel(){
+      const st=document.getElementById('model-status');
+      st.textContent='Loading…';
+      const d=await api('GET','/api/instances/'+mgrName+'/model');
+      if(d.error){st.textContent='Error: '+d.error;return;}
+      st.textContent='';
+      document.getElementById('model-provider').value=d.provider||'openrouter';
+      document.getElementById('model-name').value=d.model||'';
+      document.getElementById('model-baseurl').value=d.baseUrl||'';
+      document.getElementById('model-apikey').placeholder=d.hasApiKey?'Leave blank to keep existing key':'sk-...';
+      onModelProviderChange();
+    }
+
+    async function saveModel(){
+      const st=document.getElementById('model-status');
+      const provider=document.getElementById('model-provider').value;
+      const model=document.getElementById('model-name').value.trim();
+      const apiKey=document.getElementById('model-apikey').value.trim();
+      const baseUrl=document.getElementById('model-baseurl').value.trim();
+      if(!model){st.textContent='Model is required';return;}
+      st.textContent='Saving & restarting…';
+      const d=await api('POST','/api/instances/'+mgrName+'/model',{provider,model,apiKey,baseUrl});
+      if(d.error){st.style.color='var(--red)';st.textContent='Error: '+d.error;return;}
+      st.style.color='var(--green)';st.textContent='Saved ✓ — restarting…';
+      setTimeout(async()=>{await refreshMgrBadge();st.textContent='';st.style.color='';},3000);
     }
 
     // ── File tree (event delegation — no inline onclick) ──
