@@ -1347,9 +1347,15 @@ app.get('/', requireAdmin, (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
 <head>
-  <title>ClawStack</title>
+  <title>ClawStack — Multi-tenant OpenClaw hosting</title>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="ClawStack admin portal — manage OpenClaw AI agent instances, monitor containers, and configure your stack.">
+  <meta name="robots" content="noindex, nofollow">
+  <meta property="og:title" content="ClawStack">
+  <meta property="og:description" content="Multi-tenant OpenClaw hosting platform">
+  <meta property="og:type" content="website">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦞</text></svg>">
   <style>
     :root{
       --bg:#09090b;--surface:#18181b;--surface2:#1f1f23;--border:#27272a;--border2:#3f3f46;
