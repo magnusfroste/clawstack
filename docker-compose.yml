@@ -56,6 +56,9 @@ services:
       - CLAUDE_BASE_URL=${CLAUDE_BASE_URL:-}
       - CLAUDE_AUTH_TOKEN=${CLAUDE_AUTH_TOKEN:-}
       - CLAUDE_MODEL=${CLAUDE_MODEL:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
+      - CLAUDE_DEFAULT_MODEL=${CLAUDE_DEFAULT_MODEL:-}
     volumes:
       - paperclip_data:/paperclip
     depends_on:

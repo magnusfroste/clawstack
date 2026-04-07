@@ -889,6 +889,56 @@ app.post('/api/paperclip/exec', requireAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.post('/api/paperclip/restart', requireAdmin, async (req, res) => {
+  try {
+    // Parse .env to get fresh values
+    let envVars = {};
+    try {
+      const raw = fs.readFileSync('/clawstack-config/.env', 'utf8');
+      raw.split('\n').forEach(line => {
+        line = line.trim();
+        if (!line || line.startsWith('#')) return;
+        const idx = line.indexOf('=');
+        if (idx < 0) return;
+        const key = line.slice(0, idx).trim();
+        let val = line.slice(idx + 1).trim();
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
+        envVars[key] = val;
+      });
+    } catch {}
+
+    const r = (k, def = '') => (envVars[k] ?? def);
+    const newEnv = [
+      `BETTER_AUTH_SECRET=${r('PAPERCLIP_SECRETS_KEY')}`,
+      `PAPERCLIP_PUBLIC_URL=https://${r('PAPERCLIP_DOMAIN')}`,
+      `DATABASE_URL=postgres://paperclip:paperclip@paperclip-db:5432/paperclip`,
+      `ANTHROPIC_API_KEY=${r('ANTHROPIC_API_KEY')}`,
+      `CLAUDE_BASE_URL=${r('CLAUDE_BASE_URL')}`,
+      `CLAUDE_AUTH_TOKEN=${r('CLAUDE_AUTH_TOKEN')}`,
+      `CLAUDE_MODEL=${r('CLAUDE_MODEL')}`,
+      `ANTHROPIC_BASE_URL=${r('ANTHROPIC_BASE_URL')}`,
+      `ANTHROPIC_AUTH_TOKEN=${r('ANTHROPIC_AUTH_TOKEN')}`,
+      `CLAUDE_DEFAULT_MODEL=${r('CLAUDE_DEFAULT_MODEL')}`,
+    ];
+
+    const container = docker.getContainer(PAPERCLIP_CONTAINER);
+    const info = await container.inspect();
+
+    if (info.State.Running) await container.stop({ t: 10 });
+    await container.remove();
+
+    const created = await docker.createContainer({
+      name: PAPERCLIP_CONTAINER,
+      Image: info.Config.Image,
+      Env: newEnv,
+      HostConfig: info.HostConfig,
+      NetworkingConfig: { EndpointsConfig: { clawstack: {} } },
+    });
+    await created.start();
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/paperclip/logs', requireAdmin, async (req, res) => {
   try {
     const container = docker.getContainer(PAPERCLIP_CONTAINER);
@@ -974,7 +1024,7 @@ app.post('/api/paperclip/fix', requireAdmin, async (req, res) => {
     if (exitCode === 0) {
       results.push({ fix: 3, label: 'Claude CLI', msg: 'Already installed.', changed: false });
     } else {
-      await containerExec(PAPERCLIP_CONTAINER, 'npm install -g @anthropic-ai/claude-code 2>&1', 'root', 120000);
+      await containerExec(PAPERCLIP_CONTAINER, 'curl -fsSL https://claude.ai/install.sh | bash 2>&1', 'node', 120000);
       results.push({ fix: 3, label: 'Claude CLI', msg: 'Installed.', changed: true });
     }
   } catch (e) { results.push({ fix: 3, label: 'Claude CLI', msg: 'Error: ' + e.message, changed: false, error: true }); }
@@ -1953,21 +2003,42 @@ app.get('/', requireAdmin, (req, res) => {
 
   <div class="section">
     <div class="section-head">
+      <span class="section-title">Ask Claude</span>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="term-panel" style="display:flex;flex-direction:column">
+        <div id="pp-claude-output" class="term-output" style="color:#93c5fd"># Claude Code (node user, --print mode)\n</div>
+        <div class="term-input-row" style="gap:8px;align-items:flex-start">
+          <span class="term-prefix" style="color:#4ade80;margin-top:7px">$</span>
+          <textarea id="pp-claude-prompt" rows="2" style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 11px;border-radius:var(--radius-sm);font-size:0.82rem;font-family:monospace;outline:none;resize:vertical;line-height:1.4"
+            placeholder="Ask Claude something…"
+            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();ppRunClaude()}"></textarea>
+          <button class="term-run" style="margin-top:1px" onclick="ppRunClaude()">Ask</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
       <span class="section-title">Paperclip terminal</span>
       <button class="btn ghost sm" onclick="ppLoadLogs()">↻ Logs</button>
+      <button class="btn ghost sm" onclick="ppRestart()" id="pp-restart-btn">↺ Restart & reload .env</button>
     </div>
     <div class="card" style="padding:0;overflow:hidden">
       <div class="term-panel" style="display:flex;flex-direction:column">
         <div class="term-hints">
           <button onclick="ppShortcut('which claude && claude --version || echo not installed','node')" title="Check if Claude CLI is installed">claude version</button>
-          <button onclick="ppShortcut('npm install -g @anthropic-ai/claude-code','root')" title="Install Claude Code CLI (~takes a minute)">install claude cli</button>
+          <button onclick="ppShortcut('curl -fsSL https://claude.ai/install.sh | bash 2>&1','node')" title="Install Claude Code CLI to ~/.claude (persistent)">install claude cli</button>
           <button onclick="ppShortcut('claude --dangerously-skip-permissions --add-mcp paperclip 2>&1 || echo See Paperclip UI → Add agent → Claude Code','node')" title="Register as Claude Code agent in Paperclip">add claude agent</button>
           <button onclick="ppShortcut('cat ~/.bashrc | grep ANTHROPIC || echo no private LLM configured','node')" title="Check private LLM config">check llm config</button>
+          <button onclick="ppShortcut('curl -fsSL https://opencode.ai/install | bash && chown -R node:node /paperclip/.opencode /paperclip/.cache/opencode /paperclip/.local && echo PATH=/paperclip/.opencode/bin:\\$PATH >> /paperclip/.bashrc && echo done','root')" title="Install opencode and fix permissions">install opencode</button>
+          <button onclick="ppShortcut('export PATH=/paperclip/.opencode/bin:$PATH && opencode --version 2>&1 || echo not installed','node')" title="Check opencode version">opencode version</button>
           <button onclick="ppLoadLogs()">show logs</button>
         </div>
         <div id="pp-exec-output" class="term-output"># Paperclip container shell\n</div>
         <div class="term-input-row">
-          <select id="pp-exec-user" onchange="ppUpdatePrompt()" style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:2px 4px;font-size:11px;cursor:pointer">
+          <select id="pp-exec-user" onchange="ppUpdatePrompt()" style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:2px 4px;font-size:11px;cursor:pointer;width:auto;flex-shrink:0">
             <option value="root">root</option>
             <option value="node">node</option>
           </select>
@@ -2763,6 +2834,32 @@ app.get('/', requireAdmin, (req, res) => {
       input.value='';
       out.scrollTop=999999;
       const d=await api('POST','/api/paperclip/exec',{cmd,user});
+      out.textContent += (d.output||'(no output)') + '\\n';
+      out.scrollTop=999999;
+    }
+
+    async function ppRestart(){
+      const btn=document.getElementById('pp-restart-btn');
+      const out=document.getElementById('pp-exec-output');
+      btn.disabled=true; btn.textContent='Restarting…';
+      out.textContent += '\\n# Restarting Paperclip container…\\n';
+      out.scrollTop=999999;
+      const d=await api('POST','/api/paperclip/restart');
+      out.textContent += d.ok ? 'Done.\\n' : ('Error: '+(d.error||'unknown')+'\\n');
+      out.scrollTop=999999;
+      btn.disabled=false; btn.textContent='↺ Restart Paperclip';
+    }
+
+    async function ppRunClaude(){
+      const ta=document.getElementById('pp-claude-prompt');
+      const out=document.getElementById('pp-claude-output');
+      const prompt=ta.value.trim();
+      if(!prompt) return;
+      out.textContent += '\\n$ claude --print "' + prompt.replace(/"/g,'\\"') + '"\\n';
+      ta.value='';
+      out.scrollTop=999999;
+      const escaped=prompt.replace(/'/g,"'\\''");
+      const d=await api('POST','/api/paperclip/exec',{cmd:"claude --dangerously-skip-permissions --print '" + escaped + "'",user:'node'});
       out.textContent += (d.output||'(no output)') + '\\n';
       out.scrollTop=999999;
     }
