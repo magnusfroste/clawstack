@@ -21,7 +21,7 @@ function resolveInstancePath(instanceName, relPath) {
 function register(app) {
   // ── List instances ──
   app.get('/api/instances', requireAdmin, (req, res) => {
-    const rows = db.prepare('SELECT id, name, domain, container_name, provider, model, status, image, created_at FROM instances ORDER BY created_at DESC').all();
+    const rows = db.prepare('SELECT id, name, domain, container_name, token, provider, model, status, image, created_at FROM instances ORDER BY created_at DESC').all();
     rows.forEach(row => {
       try {
         const cfg = JSON.parse(fs.readFileSync(path.join(INSTANCES_DIR, row.name, 'config', 'openclaw.json'), 'utf8'));
