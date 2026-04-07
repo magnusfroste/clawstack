@@ -6,7 +6,7 @@ const fs      = require('fs');
 
 const { BASE_DOMAIN, ADMIN_USER, ADMIN_PASS } = require('./lib/config');
 const db        = require('./lib/db');
-const { getProxy } = require('./lib/docker');
+const { getProxy, proxyWs } = require('./lib/docker');
 const { requireAdmin } = require('./lib/auth');
 const { createWss, tokenStore } = require('./lib/terminal');
 
@@ -72,8 +72,7 @@ server.on('upgrade', (req, socket, head) => {
     const row = db.prepare('SELECT container_name FROM instances WHERE domain = ?').get(host);
     if (row) {
       const isA2A = url.pathname.startsWith('/a2a/');
-      return getProxy(row.container_name, isA2A ? 18800 : 18789).upgrade?.(req, socket, head)
-        ?? socket.destroy();
+      return proxyWs(req, socket, head, row.container_name, isA2A ? 18800 : 18789);
     }
   }
 

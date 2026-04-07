@@ -1,10 +1,11 @@
 'use strict';
 const Docker = require('dockerode');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const httpProxy = require('http-proxy');
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
-// Proxy cache: keyed by 'containerName:port'
+// HTTP proxy cache: keyed by 'containerName:port'
 const proxyCache = {};
 function getProxy(containerName, port = 18789) {
   const key = `${containerName}:${port}`;
@@ -15,6 +16,16 @@ function getProxy(containerName, port = 18789) {
     });
   }
   return proxyCache[key];
+}
+
+// WebSocket proxy (http-proxy directly — hpm v3 lacks handleUpgrade)
+const wsProxyServer = httpProxy.createProxyServer({});
+wsProxyServer.on('error', (err, req, socket) => {
+  console.error('[ws-proxy] error:', err.message);
+  if (socket?.writable) socket.destroy();
+});
+function proxyWs(req, socket, head, containerName, port = 18789) {
+  wsProxyServer.ws(req, socket, head, { target: `ws://${containerName}:${port}` });
 }
 
 // Demux Docker multiplexed stream (used when Tty: false)
@@ -71,4 +82,4 @@ function httpJSON(method, url, body) {
   });
 }
 
-module.exports = { docker, getProxy, containerExec, httpJSON, demux };
+module.exports = { docker, getProxy, proxyWs, containerExec, httpJSON, demux };
