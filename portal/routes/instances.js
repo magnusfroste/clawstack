@@ -353,7 +353,9 @@ function register(app) {
     const { messages } = req.body;
     if (!Array.isArray(messages) || !messages.length) return res.status(400).json({ error: 'messages required' });
 
-    const body = Buffer.from(JSON.stringify({ model: 'openclaw', input: messages, stream: true }));
+    const last = messages[messages.length - 1];
+    const input = last?.content ?? '';
+    const body = Buffer.from(JSON.stringify({ model: 'openclaw', input, stream: true }));
     const opts = {
       hostname: row.container_name, port: 18789, path: '/v1/responses', method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${row.token}`, 'Content-Length': body.length },
