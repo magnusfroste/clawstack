@@ -878,6 +878,34 @@ app.post('/api/system/prune', requireAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- Paperclip exec / logs ---
+app.post('/api/paperclip/exec', requireAdmin, async (req, res) => {
+  const { cmd, user } = req.body;
+  if (!cmd || typeof cmd !== 'string') return res.status(400).json({ error: 'cmd required' });
+  const runAs = user === 'node' ? 'node' : 'root';
+  try {
+    const result = await containerExec(PAPERCLIP_CONTAINER, cmd, runAs, 60000);
+    res.json({ output: result.output, exitCode: result.exitCode });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/paperclip/logs', requireAdmin, async (req, res) => {
+  try {
+    const container = docker.getContainer(PAPERCLIP_CONTAINER);
+    const stream = await container.logs({ stdout: true, stderr: true, tail: 300 });
+    const lines = [];
+    let offset = 0;
+    while (offset + 8 <= stream.length) {
+      const size = stream.readUInt32BE(offset + 4);
+      offset += 8;
+      if (offset + size > stream.length) break;
+      lines.push(stream.slice(offset, offset + size).toString('utf8'));
+      offset += size;
+    }
+    res.json({ logs: lines.join('') || stream.toString('utf8') });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // --- Paperclip API ---
 
 app.get('/api/paperclip/status', requireAdmin, async (req, res) => {
@@ -1923,6 +1951,35 @@ app.get('/', requireAdmin, (req, res) => {
     </div>
   </div>
 
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Paperclip terminal</span>
+      <button class="btn ghost sm" onclick="ppLoadLogs()">↻ Logs</button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="term-panel" style="display:flex;flex-direction:column">
+        <div class="term-hints">
+          <button onclick="ppShortcut('which claude && claude --version || echo not installed','node')" title="Check if Claude CLI is installed">claude version</button>
+          <button onclick="ppShortcut('npm install -g @anthropic-ai/claude-code','root')" title="Install Claude Code CLI (~takes a minute)">install claude cli</button>
+          <button onclick="ppShortcut('claude --dangerously-skip-permissions --add-mcp paperclip 2>&1 || echo See Paperclip UI → Add agent → Claude Code','node')" title="Register as Claude Code agent in Paperclip">add claude agent</button>
+          <button onclick="ppShortcut('cat ~/.bashrc | grep ANTHROPIC || echo no private LLM configured','node')" title="Check private LLM config">check llm config</button>
+          <button onclick="ppLoadLogs()">show logs</button>
+        </div>
+        <div id="pp-exec-output" class="term-output"># Paperclip container shell\n</div>
+        <div class="term-input-row">
+          <select id="pp-exec-user" onchange="ppUpdatePrompt()" style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:2px 4px;font-size:11px;cursor:pointer">
+            <option value="root">root</option>
+            <option value="node">node</option>
+          </select>
+          <span id="pp-exec-prefix" class="term-prefix" style="color:#f87171">#</span>
+          <input id="pp-exec-cmd" class="term-cmd" placeholder="npm install -g @anthropic-ai/claude-code" autocomplete="off" spellcheck="false"
+            onkeydown="if(event.key==='Enter') ppRunExec()">
+          <button class="term-run" onclick="ppRunExec()">Run</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </div><!-- /paperclip-page -->
 
 </div><!-- /page -->
@@ -2261,7 +2318,7 @@ app.get('/', requireAdmin, (req, res) => {
           const {done, value} = await reader.read();
           if(done) break;
           buf += decoder.decode(value, {stream:true});
-          const lines = buf.split('\n');
+          const lines = buf.split('\\n');
           buf = lines.pop();
           for(const line of lines){
             if(!line.startsWith('data:')) continue;
@@ -2679,6 +2736,43 @@ app.get('/', requireAdmin, (req, res) => {
         </div>\`
       ).join('');
       loadPaperclip();
+    }
+
+    // ── Paperclip terminal ──
+    function ppUpdatePrompt(){
+      const user=document.getElementById('pp-exec-user').value;
+      const prefix=document.getElementById('pp-exec-prefix');
+      prefix.textContent = user==='node' ? '$' : '#';
+      prefix.style.color = user==='node' ? '#4ade80' : '#f87171';
+    }
+    function ppShortcut(cmd, user){
+      if(user) document.getElementById('pp-exec-user').value=user;
+      ppUpdatePrompt();
+      document.getElementById('pp-exec-cmd').value=cmd;
+      ppRunExec();
+    }
+
+    async function ppRunExec(){
+      const input=document.getElementById('pp-exec-cmd');
+      const out=document.getElementById('pp-exec-output');
+      const user=document.getElementById('pp-exec-user').value;
+      const cmd=input.value.trim();
+      if(!cmd) return;
+      const prompt = user==='node' ? '$ ' : '# ';
+      out.textContent += '\\n' + prompt + cmd + '\\n';
+      input.value='';
+      out.scrollTop=999999;
+      const d=await api('POST','/api/paperclip/exec',{cmd,user});
+      out.textContent += (d.output||'(no output)') + '\\n';
+      out.scrollTop=999999;
+    }
+
+    async function ppLoadLogs(){
+      const out=document.getElementById('pp-exec-output');
+      out.textContent='Loading logs…';
+      const d=await api('GET','/api/paperclip/logs');
+      out.textContent=d.error?('Error: '+d.error):(d.logs||'(no logs)');
+      out.scrollTop=999999;
     }
 
     // ── System page ──
