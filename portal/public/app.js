@@ -1,0 +1,1020 @@
+'use strict';
+
+// ── Bootstrap: fetch init-data and populate form, then load instances ──
+let __initData = {};
+
+async function init() {
+  const d = await api('GET', '/api/init-data');
+  if (d.error) { console.error('init-data error:', d.error); return; }
+  __initData = d;
+
+  // CNAME target
+  document.getElementById('cname-target').textContent = d.baseDomain || 'this-server';
+
+  // Default image
+  document.getElementById('image').value = d.defaultImage || '';
+
+  // Role dropdown
+  const roleEl = document.getElementById('role');
+  Object.entries(d.agentRoles || {}).forEach(([k, v]) => {
+    const opt = document.createElement('option');
+    opt.value = k;
+    opt.textContent = `${v.label} — ${v.description}`;
+    roleEl.appendChild(opt);
+  });
+
+  // Provider dropdown
+  const provEl = document.getElementById('provider');
+  (d.providers || []).forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = p === 'private' ? 'Private LLM (self-hosted)' : p;
+    provEl.appendChild(opt);
+  });
+
+  // Default model
+  if (d.modelPresets?.openrouter) document.getElementById('model').value = d.modelPresets.openrouter;
+
+  // Load instances list
+  await loadInstances();
+}
+
+async function loadInstances() {
+  const list = document.getElementById('instances-list');
+  const countEl = document.getElementById('instances-count');
+  const d = await api('GET', '/api/instances');
+  if (d.error || !Array.isArray(d)) {
+    list.innerHTML = `<div class="empty">Error loading instances: ${esc(String(d.error || 'unknown'))}</div>`;
+    return;
+  }
+  const defaultImage = __initData.defaultImage || '';
+  countEl.textContent = `${d.length} total`;
+  if (d.length === 0) {
+    list.innerHTML = '<div class="empty">No instances yet. Create one above.</div>';
+    return;
+  }
+  list.innerHTML = `<div class="instances">${d.map(i => {
+    const img = i.image || defaultImage;
+    const imgTag = img.split(':')[1] || img;
+    return `<div class="inst-card">
+      <div class="inst-main">
+        <div class="inst-name">
+          ${esc(i.name)}
+          <span class="badge ${i.status}" id="badge-${i.name}">${i.status}</span>
+          ${i.role && i.role !== 'generalist' ? `<span class="badge role">${esc(i.role)}</span>` : ''}
+        </div>
+        ${i.liveModel ? `<div class="inst-meta">${esc(i.liveModel)}</div>` : ''}
+        <div class="inst-meta" title="${esc(img)}">${esc(imgTag)}</div>
+      </div>
+      <a class="inst-domain" href="https://${esc(i.domain)}" target="_blank">${esc(i.domain)}</a>
+      <div class="inst-token">
+        <span class="tok-val" id="tok-${i.name}" title="Click to copy" onclick="copyToken('${esc(i.token)}','${esc(i.name)}')">${i.token.slice(0,18)}…</span>
+        <button class="copy-btn" onclick="copyToken('${esc(i.token)}','${esc(i.name)}')" title="Copy token">⎘</button>
+      </div>
+      <div class="divider"></div>
+      <div class="inst-actions">
+        <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','files','${esc(img)}')">Files</button>
+        <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','logs','${esc(img)}')">Logs</button>
+        <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','cli','${esc(img)}')">CLI</button>
+        <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','version','${esc(img)}')">Version</button>
+        <div class="divider"></div>
+        <button class="btn amber sm" onclick="rowAction('${esc(i.name)}','restart')" title="Restart">↺</button>
+        <button class="btn ghost sm" id="stopstart-${i.name}" onclick="rowAction('${esc(i.name)}','${i.status === 'running' ? 'stop' : 'start'}')">${i.status === 'running' ? '■' : '▶'}</button>
+        <form method="post" action="/admin/instances/${esc(i.name)}/delete" style="margin:0">
+          <button type="submit" class="btn danger sm" onclick="return confirm('Delete ${esc(i.name)}?')">✕</button>
+        </form>
+      </div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+// ── Core API helper ──
+async function api(method, url, body) {
+  const opts = { method, headers: { Authorization: window.__auth } };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, opts);
+  return r.json().catch(() => ({ error: 'bad response' }));
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Copy token ──
+function copyToken(token, name) {
+  navigator.clipboard.writeText(token).then(() => {
+    const el = document.getElementById('tok-' + name);
+    const prev = el.textContent;
+    el.textContent = 'Copied!'; el.style.color = '#4ade80';
+    setTimeout(() => { el.textContent = prev; el.style.color = ''; }, 1500);
+  });
+}
+
+// ── Row quick actions ──
+async function rowAction(name, action) {
+  const badge = document.getElementById('badge-' + name);
+  const btn   = document.getElementById('stopstart-' + name);
+  if (badge) { badge.textContent = '…'; badge.className = 'badge starting'; }
+  await api('POST', '/api/instances/' + name + '/action', { action });
+  const d = await api('GET', '/api/instances/' + name + '/status');
+  if (badge) { badge.textContent = d.status; badge.className = 'badge ' + (d.status || 'error'); }
+  if (btn)   { btn.textContent = d.status === 'running' ? '■' : '▶'; btn.onclick = () => rowAction(name, d.status === 'running' ? 'stop' : 'start'); }
+}
+
+// ── Status polling ──
+async function pollStatus() {
+  document.querySelectorAll('[id^="badge-"]').forEach(async el => {
+    const name = el.id.slice(6);
+    const d = await api('GET', '/api/instances/' + name + '/status').catch(() => ({}));
+    if (d.status) { el.textContent = d.status; el.className = 'badge ' + (d.status || 'error'); }
+  });
+}
+setInterval(pollStatus, 15000);
+
+// ── Form: provider / role changes ──
+function onRoleChange(s) {
+  const role = (__initData.agentRoles || {})[s.value];
+  const a2aBox = document.querySelector('input[name="enableA2A"]');
+  if (a2aBox) a2aBox.checked = s.value !== 'generalist';
+}
+
+function onProviderChange(s) {
+  const m = document.getElementById('model');
+  if ((__initData.modelPresets || {})[s.value]) m.value = __initData.modelPresets[s.value];
+  const isPrivate = s.value === 'private';
+  document.getElementById('baseurl-row').style.display = isPrivate ? '' : 'none';
+  document.getElementById('baseUrl').required = isPrivate;
+  const keyInp = document.getElementById('apiKey');
+  const noKey  = (__initData.noKeyProviders || []).includes(s.value);
+  keyInp.placeholder = isPrivate ? 'optional — leave blank if not required' : 'sk-...';
+  keyInp.required = !noKey;
+}
+
+function onDomainInput(inp) {
+  const v = inp.value.trim();
+  const notice = document.getElementById('cname-notice');
+  const label  = document.getElementById('cname-domain');
+  if (v && v.includes('.')) { notice.style.display = ''; label.textContent = v; }
+  else { notice.style.display = 'none'; }
+}
+
+// ── Manager modal ──
+let mgrName = null, mgrPath = null, mgrTab = 'files', mgrImage = null;
+
+function openMgr(name, tab = 'files', image = '') {
+  mgrName = name; mgrPath = null; mgrImage = image;
+  document.getElementById('mgr-title').textContent = name;
+  document.getElementById('mgr-editor').value = '';
+  document.getElementById('btn-save').disabled = true;
+  document.getElementById('mgr-status').textContent = '';
+  document.getElementById('mgr-tree').innerHTML = '';
+  document.getElementById('chat-messages').innerHTML = '';
+  document.getElementById('mgr').classList.add('open');
+  refreshMgrBadge();
+  switchTab(tab);
+}
+function closeMgr() {
+  mgrCloseTerminal();
+  document.getElementById('mgr').classList.remove('open');
+  mgrName = null;
+}
+
+async function refreshMgrBadge() {
+  const d = await api('GET', '/api/instances/' + mgrName + '/status');
+  const b = document.getElementById('mgr-badge');
+  b.textContent = d.status || '?'; b.className = 'badge ' + (d.status || 'error');
+}
+
+function switchTab(tab) {
+  mgrTab = tab;
+  ['files','logs','cli','exec','terminal','version','model','chat'].forEach(t =>
+    document.getElementById('tab-' + t).className = 'tab' + (tab === t ? ' active' : '')
+  );
+  document.getElementById('mgr-editor').style.display        = tab === 'files'    ? ''      : 'none';
+  document.getElementById('mgr-logs').style.display          = tab === 'logs'     ? 'block' : 'none';
+  document.getElementById('mgr-cli').style.display           = tab === 'cli'      ? 'flex'  : 'none';
+  document.getElementById('mgr-exec').style.display          = tab === 'exec'     ? 'flex'  : 'none';
+  document.getElementById('mgr-terminal').style.display      = tab === 'terminal' ? 'flex'  : 'none';
+  document.getElementById('mgr-version').style.display       = tab === 'version'  ? 'flex'  : 'none';
+  document.getElementById('mgr-model').style.display         = tab === 'model'    ? 'flex'  : 'none';
+  document.getElementById('mgr-chat').style.display          = tab === 'chat'     ? 'flex'  : 'none';
+  document.getElementById('btn-save').style.display          = tab === 'files'    ? ''      : 'none';
+  document.getElementById('btn-refresh-logs').style.display  = tab === 'logs'     ? ''      : 'none';
+  document.getElementById('btn-copy-logs').style.display     = tab === 'logs'     ? ''      : 'none';
+  document.getElementById('btn-backup').style.display        = tab === 'files'    ? ''      : 'none';
+  document.getElementById('btn-restore').style.display       = tab === 'files'    ? ''      : 'none';
+  document.getElementById('mgr-tree').style.display          = tab === 'files'    ? ''      : 'none';
+
+  if (tab === 'files') {
+    if (!document.getElementById('mgr-tree').children.length) loadTree('');
+    document.getElementById('mgr-crumb').textContent = mgrPath || 'Select a file';
+  } else if (tab === 'logs') {
+    document.getElementById('mgr-crumb').textContent = 'Container logs (last 300 lines)';
+    loadLogs();
+  } else if (tab === 'cli') {
+    document.getElementById('mgr-crumb').textContent = 'OpenClaw CLI (node user)';
+    setTimeout(() => document.getElementById('cli-cmd').focus(), 50);
+  } else if (tab === 'version') {
+    document.getElementById('mgr-crumb').textContent = 'OpenClaw version management';
+    document.getElementById('version-current').textContent = mgrImage || 'unknown';
+    const colonIdx = (mgrImage || '').lastIndexOf(':');
+    const imgBase = colonIdx > 0 ? (mgrImage || '').slice(0, colonIdx + 1) : '';
+    const imgTag  = colonIdx > 0 ? (mgrImage || '').slice(colonIdx + 1)    : (mgrImage || '');
+    document.getElementById('version-base').textContent = imgBase;
+    document.getElementById('version-input').value = imgTag;
+    document.getElementById('version-status').textContent = '';
+  } else if (tab === 'model') {
+    document.getElementById('mgr-crumb').textContent = 'Model configuration';
+    loadModel();
+  } else if (tab === 'chat') {
+    document.getElementById('mgr-crumb').textContent = 'Chat';
+  } else if (tab === 'terminal') {
+    document.getElementById('mgr-crumb').textContent = 'Interactive PTY terminal';
+  } else {
+    document.getElementById('mgr-crumb').textContent = 'Root shell (docker exec --user root)';
+  }
+}
+
+// ── Chat ──
+const chatHistory = {};
+let chatStreaming  = false;
+
+function chatAddBubble(role, text, streaming = false) {
+  const msgs  = document.getElementById('chat-messages');
+  const wrap  = document.createElement('div');
+  wrap.className = 'chat-msg';
+  const label = document.createElement('div');
+  label.className = 'chat-role';
+  label.textContent = role === 'user' ? 'You' : mgrName;
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-bubble ' + role + (streaming ? ' streaming' : '');
+  bubble.textContent = text;
+  wrap.appendChild(label);
+  wrap.appendChild(bubble);
+  msgs.appendChild(wrap);
+  msgs.scrollTop = msgs.scrollHeight;
+  return bubble;
+}
+
+async function sendChat() {
+  if (chatStreaming) return;
+  const input = document.getElementById('chat-input');
+  const text  = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  if (!chatHistory[mgrName]) chatHistory[mgrName] = [];
+  chatHistory[mgrName].push({ role: 'user', content: text });
+  chatAddBubble('user', text);
+  const bubble = chatAddBubble('assistant', '', true);
+  chatStreaming = true;
+  document.getElementById('chat-send').disabled = true;
+  let accumulated = '';
+  try {
+    const resp = await fetch('/api/instances/' + mgrName + '/chat', {
+      method: 'POST',
+      headers: { Authorization: window.__auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: chatHistory[mgrName] }),
+    });
+    if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const raw = line.slice(5).trim();
+        if (raw === '[DONE]') continue;
+        try {
+          const ev = JSON.parse(raw);
+          if (ev.type === 'response.output_text.delta' && ev.delta) {
+            accumulated += ev.delta;
+            bubble.textContent = accumulated;
+            document.getElementById('chat-messages').scrollTop = 999999;
+          } else if (ev.type === 'response.output_text.done' && ev.text && !accumulated) {
+            accumulated = ev.text;
+            bubble.textContent = accumulated;
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    accumulated = '(Error: ' + e.message + ')';
+    bubble.textContent = accumulated;
+  }
+  bubble.classList.remove('streaming');
+  chatStreaming = false;
+  document.getElementById('chat-send').disabled = false;
+  if (accumulated) chatHistory[mgrName].push({ role: 'assistant', content: accumulated });
+  input.focus();
+}
+
+function onModelProviderChange() {
+  const p = document.getElementById('model-provider').value;
+  document.getElementById('model-baseurl-row').style.display = p === 'private' ? '' : 'none';
+}
+
+async function loadModel() {
+  const st = document.getElementById('model-status');
+  st.textContent = 'Loading…';
+  const d = await api('GET', '/api/instances/' + mgrName + '/model');
+  if (d.error) { st.textContent = 'Error: ' + d.error; return; }
+  st.textContent = '';
+  document.getElementById('model-provider').value = d.provider || 'openrouter';
+  document.getElementById('model-name').value     = d.model    || '';
+  document.getElementById('model-baseurl').value  = d.baseUrl  || '';
+  document.getElementById('model-apikey').placeholder = d.hasApiKey ? 'Leave blank to keep existing key' : 'sk-...';
+  onModelProviderChange();
+}
+
+async function saveModel() {
+  const st       = document.getElementById('model-status');
+  const provider = document.getElementById('model-provider').value;
+  const model    = document.getElementById('model-name').value.trim();
+  const apiKey   = document.getElementById('model-apikey').value.trim();
+  const baseUrl  = document.getElementById('model-baseurl').value.trim();
+  if (!model) { st.textContent = 'Model is required'; return; }
+  st.textContent = 'Saving & restarting…';
+  const d = await api('POST', '/api/instances/' + mgrName + '/model', { provider, model, apiKey, baseUrl });
+  if (d.error) { st.style.color = 'var(--red)'; st.textContent = 'Error: ' + d.error; return; }
+  st.style.color = 'var(--green)'; st.textContent = 'Saved ✓ — restarting…';
+  setTimeout(async () => { await refreshMgrBadge(); st.textContent = ''; st.style.color = ''; }, 3000);
+}
+
+// ── File tree ──
+const tree = document.getElementById('mgr-tree');
+tree.addEventListener('click', async e => {
+  const row = e.target.closest('.tree-row');
+  if (!row) return;
+  if (row.dataset.type === 'file') {
+    tree.querySelectorAll('.tree-row').forEach(r => r.classList.remove('active'));
+    row.classList.add('active');
+    loadFile(row.dataset.path);
+  } else {
+    const arrow    = row.querySelector('.tree-arrow');
+    const children = row.nextElementSibling;
+    const opening  = !children.classList.contains('open');
+    if (arrow) arrow.classList.toggle('open', opening);
+    children.classList.toggle('open', opening);
+    if (opening && children.children.length === 0) {
+      children.innerHTML = '<div style="padding:3px 8px;color:#333">Loading…</div>';
+      const d = await api('GET', '/api/instances/' + mgrName + '/files?path=' + encodeURIComponent(row.dataset.path));
+      children.innerHTML = d.error
+        ? '<div style="padding:3px 8px;color:#f87171">' + esc(d.error) + '</div>'
+        : buildTree(d.entries, row.dataset.path);
+    }
+  }
+});
+
+async function loadTree(dirPath) {
+  tree.innerHTML = '<div style="padding:6px 8px;color:#333">Loading…</div>';
+  const d = await api('GET', '/api/instances/' + mgrName + '/files?path=' + encodeURIComponent(dirPath));
+  tree.innerHTML = d.error
+    ? '<div style="padding:6px 8px;color:#f87171">' + esc(d.error) + '</div>'
+    : buildTree(d.entries, dirPath);
+}
+
+function buildTree(entries, parent) {
+  return entries.map(e => {
+    const p = parent ? parent + '/' + e.name : e.name;
+    if (e.type === 'dir') return `
+      <div class="tree-row" data-type="dir" data-path="${esc(p)}">
+        <span class="tree-arrow">▶</span>
+        <span class="tree-icon" style="color:#6b7280">📁</span>
+        <span class="tree-name">${esc(e.name)}</span>
+      </div>
+      <div class="tree-children"></div>`;
+    const icon = p.endsWith('.json') ? '{}' : p.endsWith('.md') ? '📝' : p.endsWith('.log') || p.endsWith('.jsonl') ? '📋' : '📄';
+    return `<div class="tree-row" data-type="file" data-path="${esc(p)}">
+      <span class="tree-arrow" style="visibility:hidden">▶</span>
+      <span class="tree-icon" style="color:#4b5563">${icon}</span>
+      <span class="tree-name">${esc(e.name)}</span>
+    </div>`;
+  }).join('');
+}
+
+async function loadFile(path) {
+  document.getElementById('mgr-crumb').textContent  = path;
+  document.getElementById('mgr-status').textContent = 'Loading…';
+  document.getElementById('btn-save').disabled = true;
+  const d = await api('GET', '/api/instances/' + mgrName + '/files?path=' + encodeURIComponent(path));
+  if (d.error) { document.getElementById('mgr-status').textContent = d.error; return; }
+  mgrPath = path;
+  document.getElementById('mgr-editor').value       = d.content;
+  document.getElementById('mgr-status').textContent = '';
+  document.getElementById('btn-save').disabled       = false;
+}
+
+async function saveFile() {
+  if (!mgrPath) return;
+  const content = document.getElementById('mgr-editor').value;
+  if (mgrPath.endsWith('.json') && !mgrPath.endsWith('.jsonl')) {
+    try { JSON.parse(content); } catch (e) { document.getElementById('mgr-status').textContent = 'Invalid JSON: ' + e.message; return; }
+  }
+  document.getElementById('mgr-status').textContent = 'Saving…';
+  document.getElementById('btn-save').disabled = true;
+  const d = await api('POST', '/api/instances/' + mgrName + '/files', { path: mgrPath, content });
+  document.getElementById('btn-save').disabled = false;
+  document.getElementById('mgr-status').textContent = d.success ? 'Saved ✓' : ('Error: ' + d.error);
+  if (d.success) setTimeout(() => document.getElementById('mgr-status').textContent = '', 2500);
+}
+
+function downloadBackup() {
+  const st = document.getElementById('mgr-status');
+  st.textContent = 'Preparing backup…';
+  fetch('/api/instances/' + mgrName + '/backup', { headers: { Authorization: window.__auth } })
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a   = document.createElement('a');
+      a.href = url; a.download = mgrName + '-backup.tar.gz'; a.click();
+      URL.revokeObjectURL(url); st.textContent = '';
+    }).catch(e => { st.textContent = 'Backup failed: ' + e.message; });
+}
+
+async function uploadRestore(input) {
+  const file = input.files[0]; input.value = '';
+  if (!file) return;
+  const st = document.getElementById('mgr-status');
+  if (!confirm('Restore will stop the container, replace all files, then restart. Continue?')) return;
+  st.textContent = 'Uploading…';
+  try {
+    const r = await fetch('/api/instances/' + mgrName + '/restore', {
+      method: 'POST',
+      headers: { Authorization: window.__auth, 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    const d = await r.json();
+    if (d.success) {
+      st.textContent = 'Restored ✓ — restarting…';
+      document.getElementById('mgr-tree').innerHTML = '';
+      setTimeout(() => { loadTree(''); refreshMgrBadge(); st.textContent = ''; }, 2500);
+    } else { st.textContent = 'Restore failed: ' + d.error; }
+  } catch (e) { st.textContent = 'Restore failed: ' + e.message; }
+}
+
+async function copyLogs() {
+  const txt = document.getElementById('mgr-logs').textContent;
+  if (!txt) return;
+  await navigator.clipboard.writeText(txt);
+  const btn = document.getElementById('btn-copy-logs');
+  btn.textContent = '✓ Copied';
+  setTimeout(() => btn.textContent = '⎘ Copy', 2000);
+}
+
+async function loadLogs() {
+  const el = document.getElementById('mgr-logs');
+  el.textContent = 'Loading…';
+  const d = await api('GET', '/api/instances/' + mgrName + '/logs');
+  el.textContent = d.error ? ('Error: ' + d.error) : (d.logs || '(no logs)');
+  el.scrollTop   = el.scrollHeight;
+}
+
+// ── CLI tab ──
+const cliHistory = []; let cliHistIdx = -1;
+
+document.getElementById('cli-cmd').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { runCli(); return; }
+  if (e.key === 'ArrowUp')   { e.preventDefault(); if (cliHistIdx < cliHistory.length - 1) { cliHistIdx++; e.target.value = cliHistory[cliHistory.length - 1 - cliHistIdx] || ''; } }
+  if (e.key === 'ArrowDown') { e.preventDefault(); if (cliHistIdx > 0) { cliHistIdx--; e.target.value = cliHistory[cliHistory.length - 1 - cliHistIdx] || ''; } else { cliHistIdx = -1; e.target.value = ''; } }
+});
+
+function cliShortcut(cmd) {
+  const inp = document.getElementById('cli-cmd');
+  inp.value = cmd; inp.focus(); inp.setSelectionRange(cmd.length, cmd.length);
+}
+
+async function runCli() {
+  const inp = document.getElementById('cli-cmd');
+  const out = document.getElementById('cli-output');
+  const btn = document.getElementById('cli-run');
+  const cmd = inp.value.trim();
+  if (!cmd) return;
+  cliHistory.push(cmd); cliHistIdx = -1;
+  inp.value = ''; btn.disabled = true;
+  out.textContent += '\n$ ' + cmd + '\n';
+  out.scrollTop = out.scrollHeight;
+  const d = await api('POST', '/api/instances/' + mgrName + '/cli', { cmd });
+  if (d.error) { out.textContent += '[error] ' + d.error + '\n'; }
+  else { out.textContent += (d.output || '(no output)'); if (d.exitCode !== 0) out.textContent += '[exit ' + d.exitCode + ']\n'; }
+  out.scrollTop = out.scrollHeight;
+  btn.disabled = false; inp.focus();
+}
+
+// ── Exec tab ──
+const execHistory = []; let execHistIdx = -1;
+
+document.getElementById('exec-cmd').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { runExec(); return; }
+  if (e.key === 'ArrowUp')   { e.preventDefault(); if (execHistIdx < execHistory.length - 1) { execHistIdx++; e.target.value = execHistory[execHistory.length - 1 - execHistIdx] || ''; } }
+  if (e.key === 'ArrowDown') { e.preventDefault(); if (execHistIdx > 0) { execHistIdx--; e.target.value = execHistory[execHistory.length - 1 - execHistIdx] || ''; } else { execHistIdx = -1; e.target.value = ''; } }
+});
+
+async function runExec() {
+  const inp = document.getElementById('exec-cmd');
+  const out = document.getElementById('exec-output');
+  const btn = document.getElementById('exec-run');
+  const cmd = inp.value.trim();
+  if (!cmd) return;
+  execHistory.push(cmd); execHistIdx = -1;
+  inp.value = ''; btn.disabled = true;
+  out.textContent += '\n# ' + cmd + '\n';
+  out.scrollTop = out.scrollHeight;
+  const d = await api('POST', '/api/instances/' + mgrName + '/exec', { cmd });
+  if (d.error) { out.textContent += '[error] ' + d.error + '\n'; }
+  else { out.textContent += (d.output || '(no output)'); if (d.exitCode !== 0) out.textContent += '[exit ' + d.exitCode + ']\n'; }
+  out.scrollTop = out.scrollHeight;
+  btn.disabled = false; inp.focus();
+}
+
+async function mgrAction(action) {
+  const s = document.getElementById('mgr-action-status');
+  s.textContent = action + '…';
+  await api('POST', '/api/instances/' + mgrName + '/action', { action });
+  await refreshMgrBadge();
+  s.textContent = 'Done';
+  setTimeout(() => s.textContent = '', 2500);
+}
+
+async function recreateInstance() {
+  const tag = document.getElementById('version-input').value.trim();
+  if (!tag) { document.getElementById('version-status').textContent = 'Enter a version tag first'; return; }
+  const base  = document.getElementById('version-base').textContent;
+  const image = (tag.includes('/') || !base) ? tag : base + tag;
+  const btn   = document.getElementById('version-btn');
+  const st    = document.getElementById('version-status');
+  btn.disabled = true;
+  st.textContent = 'Pulling image… this may take a minute';
+  const d = await api('POST', '/api/instances/' + mgrName + '/recreate', { image });
+  btn.disabled = false;
+  if (d.error) { st.textContent = 'Error: ' + d.error; st.style.color = 'var(--red)'; }
+  else {
+    mgrImage = d.image;
+    document.getElementById('version-current').textContent = d.image;
+    st.textContent = 'Done — container running new image'; st.style.color = 'var(--green)';
+    await refreshMgrBadge();
+    const badge = document.getElementById('badge-' + mgrName);
+    if (badge) { const s = await api('GET', '/api/instances/' + mgrName + '/status'); badge.textContent = s.status; badge.className = 'badge ' + (s.status || 'error'); }
+    setTimeout(() => { st.textContent = ''; st.style.color = ''; }, 4000);
+  }
+}
+
+// ── Page navigation ──
+let sysTimer = null, ppTimer = null;
+
+function showPage(name) {
+  ['instances', 'system', 'paperclip'].forEach(p => {
+    document.getElementById(p + '-page').style.display = name === p ? '' : 'none';
+    document.getElementById('nav-' + p).classList.toggle('active', name === p);
+  });
+  clearInterval(sysTimer); clearInterval(ppTimer);
+  if (name === 'system')    { loadSystem(); cfgLoad('.env'); sysTimer = setInterval(loadSystem, 5000); }
+  if (name === 'paperclip') { loadPaperclip(); ppTimer = setInterval(loadPaperclip, 8000); }
+}
+
+// ── Paperclip page ──
+function fmtHB(secondsAgo) {
+  if (secondsAgo === null || secondsAgo === undefined) return '<span style="color:var(--text3)">never</span>';
+  if (secondsAgo < 120)  return `<span style="color:var(--green)">${secondsAgo}s ago</span>`;
+  if (secondsAgo < 3600) return `<span style="color:var(--amber)">${Math.round(secondsAgo/60)}m ago</span>`;
+  return `<span style="color:var(--red)">${Math.round(secondsAgo/3600)}h ago</span>`;
+}
+
+async function loadPaperclip() {
+  let d;
+  try { d = await api('GET', '/api/paperclip/status'); } catch { return; }
+
+  const setCard = (id, running, status, sub) => {
+    document.getElementById('pp-dot-' + id).className = 'pp-dot ' + (running ? 'ok' : 'err');
+    document.getElementById('pp-val-' + id).textContent = status;
+    document.getElementById('pp-sub-' + id).textContent = sub || '';
+  };
+  setCard('app', d.paperclip.running, d.paperclip.running ? 'Running' : d.paperclip.status);
+  setCard('db',  d.db.running,        d.db.running  ? 'Running' : d.db.status);
+  setCard('api', !!d.api, d.api ? d.api.status : 'unreachable', d.api?.deploymentMode || '');
+  if (d.api) document.getElementById('pp-dot-api').className = 'pp-dot ' + (d.api.status === 'ok' ? 'ok' : 'warn');
+
+  const instBody = document.getElementById('pp-inst-body');
+  if (!d.instances.length) {
+    instBody.innerHTML = '<tr><td colspan="4" style="color:var(--text3);padding:1.5rem;text-align:center">No instances found.</td></tr>';
+  } else {
+    instBody.innerHTML = d.instances.map(inst => {
+      const isPending = d.pending.some(p => p.claw_name === inst.name);
+      let statusCell, actionCell;
+      if (inst.connected) {
+        statusCell = '<span class="badge running">Connected</span>';
+        actionCell = `<button class="btn ghost xs" onclick="ppDisconnect('${inst.name}')">Disconnect</button>`;
+      } else if (isPending) {
+        statusCell = '<span class="badge starting">Awaiting approval</span>';
+        actionCell = `<button class="btn green xs" onclick="ppFinalize('${inst.name}')">Finalize</button>`;
+      } else {
+        statusCell = '<span class="badge stopped">Not connected</span>';
+        actionCell = `<div class="pp-invite-row">
+          <input id="invite-${inst.name}" placeholder="pcp_invite_…" style="font-size:0.75rem">
+          <button class="btn sm" onclick="ppConnect('${inst.name}')">Connect</button>
+        </div>`;
+      }
+      const hb = inst.agent ? fmtHB(inst.agent.secondsAgo) : '<span style="color:var(--text3)">—</span>';
+      return `<tr>
+        <td style="font-weight:500">${inst.name}</td>
+        <td>${statusCell}</td>
+        <td class="pp-hb">${hb}</td>
+        <td>${actionCell}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  if (d.agents.length) {
+    document.getElementById('pp-agents-section').style.display = '';
+    document.getElementById('pp-agents-body').innerHTML = d.agents.map(a => `<tr>
+      <td style="font-weight:500">${a.name}</td>
+      <td><span class="badge role">${a.role || '—'}</span></td>
+      <td style="font-size:0.72rem;color:var(--text3);font-family:monospace">${a.url || '—'}</td>
+      <td class="pp-hb">${fmtHB(a.secondsAgo)}</td>
+    </tr>`).join('');
+  } else {
+    document.getElementById('pp-agents-section').style.display = 'none';
+  }
+}
+
+async function ppConnect(clawName) {
+  const token = document.getElementById('invite-' + clawName)?.value?.trim();
+  if (!token) { alert('Paste an invite token first.'); return; }
+  const d = await api('POST', '/api/paperclip/connect', { clawName, inviteToken: token });
+  if (d.error) { alert('Error: ' + d.error + (d.detail ? '\n' + JSON.stringify(d.detail) : '')); return; }
+  alert('Join request sent for ' + d.agentName + '.\n\nNow approve it in Paperclip UI, then click Finalize.');
+  loadPaperclip();
+}
+
+async function ppFinalize(clawName) {
+  const d = await api('POST', '/api/paperclip/finalize/' + clawName);
+  if (d.error) { alert('Error: ' + d.error); return; }
+  const stepLog = (d.steps || []).map(s => (s.ok ? '✓' : '✗') + ' ' + s.msg).join('\n');
+  alert('Done!\n\n' + stepLog);
+  loadPaperclip();
+}
+
+async function ppDisconnect(clawName) {
+  if (!confirm('Remove Paperclip connection from ' + clawName + '?\nThis only removes local files, not the Paperclip agent record.')) return;
+  await api('POST', '/api/instances/' + clawName + '/exec', { cmd: 'rm -f /home/node/.openclaw/workspace/paperclip-claimed-api-key.json' });
+  loadPaperclip();
+}
+
+async function ppFix() {
+  const btn = document.getElementById('pp-fix-btn');
+  btn.disabled = true; btn.textContent = 'Running…';
+  const d = await api('POST', '/api/paperclip/fix');
+  btn.disabled = false; btn.textContent = 'Run Fix';
+  const el = document.getElementById('pp-fix-results');
+  el.style.display = '';
+  el.innerHTML = (d.results || []).map(r =>
+    `<div class="pp-fix-result">
+      <span class="pp-fix-label">Fix ${r.fix}: ${r.label}</span>
+      <span class="pp-fix-msg ${r.error ? 'error' : r.changed ? 'changed' : ''}">${r.msg}</span>
+    </div>`
+  ).join('');
+  loadPaperclip();
+}
+
+// ── Paperclip exec shell ──
+function ppUpdatePrompt() {
+  const user   = document.getElementById('pp-exec-user').value;
+  const prefix = document.getElementById('pp-exec-prefix');
+  prefix.textContent = user === 'node' ? '$' : '#';
+  prefix.style.color = user === 'node' ? '#4ade80' : '#f87171';
+}
+function ppShortcut(cmd, user) {
+  if (user) document.getElementById('pp-exec-user').value = user;
+  ppUpdatePrompt();
+  document.getElementById('pp-exec-cmd').value = cmd;
+  ppRunExec();
+}
+async function ppRunExec() {
+  const input = document.getElementById('pp-exec-cmd');
+  const out   = document.getElementById('pp-exec-output');
+  const user  = document.getElementById('pp-exec-user').value;
+  const cmd   = input.value.trim();
+  if (!cmd) return;
+  const prompt = user === 'node' ? '$ ' : '# ';
+  out.textContent += '\n' + prompt + cmd + '\n';
+  input.value = ''; out.scrollTop = 999999;
+  const d = await api('POST', '/api/paperclip/exec', { cmd, user });
+  out.textContent += (d.output || '(no output)') + '\n';
+  out.scrollTop = 999999;
+}
+async function ppRestart() {
+  const btn = document.getElementById('pp-restart-btn');
+  const out = document.getElementById('pp-exec-output');
+  btn.disabled = true; btn.textContent = 'Restarting…';
+  out.textContent += '\n# Restarting Paperclip container…\n';
+  out.scrollTop = 999999;
+  const d = await api('POST', '/api/paperclip/restart');
+  out.textContent += d.ok ? 'Done.\n' : ('Error: ' + (d.error || 'unknown') + '\n');
+  out.scrollTop = 999999;
+  btn.disabled = false; btn.textContent = '↺ Restart Paperclip';
+}
+async function ppRunClaude() {
+  const ta  = document.getElementById('pp-claude-prompt');
+  const out = document.getElementById('pp-claude-output');
+  const prompt = ta.value.trim();
+  if (!prompt) return;
+  out.textContent += '\n$ claude --print "' + prompt.replace(/"/g, '\\"') + '"\n';
+  ta.value = ''; out.scrollTop = 999999;
+  const escaped = prompt.replace(/'/g, "'\\''");
+  const d = await api('POST', '/api/paperclip/exec', { cmd: "claude --dangerously-skip-permissions --print '" + escaped + "'", user: 'node' });
+  out.textContent += (d.output || '(no output)') + '\n';
+  out.scrollTop = 999999;
+}
+async function ppLoadLogs() {
+  const out = document.getElementById('pp-exec-output');
+  out.textContent = 'Loading logs…';
+  const d = await api('GET', '/api/paperclip/logs');
+  out.textContent = d.error ? ('Error: ' + d.error) : (d.logs || '(no logs)');
+  out.scrollTop = 999999;
+}
+
+// ── PTY terminal (xterm.js) — shared helpers ──
+const XTERM_THEME = {
+  background: '#09090b', foreground: '#fafafa', cursor: '#3b82f6',
+  black: '#09090b', red: '#ef4444', green: '#22c55e', yellow: '#f59e0b',
+  blue: '#3b82f6', magenta: '#8b5cf6', cyan: '#06b6d4', white: '#e5e7eb',
+  brightBlack: '#374151', brightRed: '#fca5a5', brightGreen: '#86efac',
+  brightYellow: '#fde68a', brightBlue: '#93c5fd', brightMagenta: '#c4b5fd',
+  brightCyan: '#67e8f9', brightWhite: '#f9fafb',
+};
+
+async function openPtyTerminal(containerId, user, containerId2 = null) {
+  const d = await api('POST', '/api/terminal/token', { container: containerId, user });
+  if (d.error) { alert('Terminal error: ' + d.error); return null; }
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws    = new WebSocket(`${proto}//${location.host}/ws/terminal?token=${d.token}`);
+  ws.binaryType = 'arraybuffer';
+
+  const term     = new Terminal({ theme: XTERM_THEME, fontSize: 13, fontFamily: 'Fira Code, Consolas, monospace', cursorBlink: true });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+
+  return { term, fitAddon, ws };
+}
+
+function wireTerminal(term, fitAddon, ws, containerEl) {
+  term.open(containerEl);
+  setTimeout(() => fitAddon.fit(), 50);
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  };
+  ws.onmessage = e => {
+    term.write(new Uint8Array(e.data));
+  };
+  ws.onclose = () => { term.write('\r\n[Connection closed]\r\n'); };
+  ws.onerror = () => { term.write('\r\n[WebSocket error]\r\n'); };
+
+  term.onData(data => {
+    if (ws.readyState === 1) ws.send(new TextEncoder().encode(data));
+  });
+  term.onResize(({ cols, rows }) => {
+    if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+  });
+
+  const ro = new ResizeObserver(() => { try { fitAddon.fit(); } catch {} });
+  ro.observe(containerEl);
+  return ro;
+}
+
+// ── PTY: Paperclip ──
+let ppPtyTerm = null, ppPtyWs = null, ppPtyRo = null;
+
+async function ppOpenTerminal() {
+  const user      = document.getElementById('pp-pty-user').value;
+  const container = 'clawstack-paperclip-1';
+  const result    = await openPtyTerminal(container, user);
+  if (!result) return;
+  const { term, fitAddon, ws } = result;
+  ppPtyTerm = term; ppPtyWs = ws;
+
+  const card = document.getElementById('pp-pty-card');
+  card.style.display = '';
+  document.getElementById('pp-pty-open-btn').style.display  = 'none';
+  document.getElementById('pp-pty-close-btn').style.display = '';
+
+  ppPtyRo = wireTerminal(term, fitAddon, ws, document.getElementById('pp-pty-container'));
+}
+
+function ppCloseTerminal() {
+  if (ppPtyWs)  { ppPtyWs.close(); ppPtyWs = null; }
+  if (ppPtyTerm) { ppPtyTerm.dispose(); ppPtyTerm = null; }
+  if (ppPtyRo)  { ppPtyRo.disconnect(); ppPtyRo = null; }
+  document.getElementById('pp-pty-card').style.display         = 'none';
+  document.getElementById('pp-pty-open-btn').style.display     = '';
+  document.getElementById('pp-pty-close-btn').style.display    = 'none';
+  document.getElementById('pp-pty-container').innerHTML        = '';
+}
+
+// ── PTY: Manager Modal ──
+let mgrPtyTerm = null, mgrPtyWs = null, mgrPtyRo = null;
+
+async function mgrOpenTerminal() {
+  if (!mgrName) return;
+  const user   = document.getElementById('mgr-pty-user').value;
+  const status = document.getElementById('mgr-pty-status');
+
+  // Find container name for instance
+  const inst   = await api('GET', '/api/instances/' + mgrName + '/status');
+  const d      = await api('GET', '/api/instances');
+  const row    = Array.isArray(d) ? d.find(i => i.name === mgrName) : null;
+  if (!row) { status.textContent = 'Instance not found'; return; }
+
+  status.textContent = 'Connecting…';
+  const result = await openPtyTerminal(row.container_name, user);
+  if (!result) { status.textContent = 'Failed to open terminal'; return; }
+
+  const { term, fitAddon, ws } = result;
+  mgrPtyTerm = term; mgrPtyWs = ws;
+  status.textContent = '';
+
+  document.getElementById('mgr-pty-open-btn').style.display  = 'none';
+  document.getElementById('mgr-pty-close-btn').style.display = '';
+
+  mgrPtyRo = wireTerminal(term, fitAddon, ws, document.getElementById('mgr-pty-container'));
+}
+
+function mgrCloseTerminal() {
+  if (mgrPtyWs)  { mgrPtyWs.close(); mgrPtyWs = null; }
+  if (mgrPtyTerm) { mgrPtyTerm.dispose(); mgrPtyTerm = null; }
+  if (mgrPtyRo)  { mgrPtyRo.disconnect(); mgrPtyRo = null; }
+  const c = document.getElementById('mgr-pty-container');
+  if (c) c.innerHTML = '';
+  const openBtn  = document.getElementById('mgr-pty-open-btn');
+  const closeBtn = document.getElementById('mgr-pty-close-btn');
+  if (openBtn)  openBtn.style.display  = '';
+  if (closeBtn) closeBtn.style.display = 'none';
+}
+
+// ── System page ──
+function fmtBytes(b) {
+  if (b === 0) return '0 B';
+  const u = ['B','KB','MB','GB','TB'];
+  const i = Math.floor(Math.log(b) / Math.log(1024));
+  return (b / Math.pow(1024, i)).toFixed(i > 1 ? 1 : 0) + ' ' + u[i];
+}
+
+function setRing(id, pct, color) {
+  const circ = 2 * Math.PI * 15.9;
+  const el   = document.getElementById(id);
+  if (!el) return;
+  el.setAttribute('stroke-dasharray', `${(pct / 100 * circ).toFixed(1)} ${circ.toFixed(1)}`);
+  if (color) el.style.stroke = color;
+}
+
+function ringColor(pct) {
+  if (pct >= 90) return 'var(--red)';
+  if (pct >= 70) return 'var(--amber)';
+  return null;
+}
+
+async function loadSystem() {
+  let d;
+  try { d = await api('GET', '/api/system'); } catch { return; }
+
+  const cpuC = ringColor(d.cpu.pct);
+  setRing('ring-cpu', d.cpu.pct, cpuC);
+  document.getElementById('ring-cpu-val').textContent  = d.cpu.pct + '%';
+  document.getElementById('stat-cpu-main').textContent = d.cpu.pct + '%';
+  if (cpuC) document.getElementById('ring-cpu-val').style.color = cpuC;
+
+  const memC = ringColor(d.mem.pct);
+  setRing('ring-mem', d.mem.pct, memC);
+  document.getElementById('ring-mem-val').textContent  = d.mem.pct + '%';
+  document.getElementById('stat-mem-main').textContent = fmtBytes(d.mem.used);
+  document.getElementById('stat-mem-sub').textContent  = 'of ' + fmtBytes(d.mem.total);
+
+  const diskC = ringColor(d.disk.pct);
+  setRing('ring-disk', d.disk.pct, diskC);
+  document.getElementById('ring-disk-val').textContent  = d.disk.pct + '%';
+  document.getElementById('stat-disk-main').textContent = fmtBytes(d.disk.used);
+  document.getElementById('stat-disk-sub').textContent  = 'of ' + fmtBytes(d.disk.total);
+
+  const body = document.getElementById('ct-body');
+  body.innerHTML = d.containers.map(c => {
+    const memBarPct  = Math.min(c.memPct, 100);
+    const cpuBarPct  = Math.min(c.cpuPct * 5, 100);
+    const memBarClass = c.memPct >= 90 ? 'danger' : c.memPct >= 70 ? 'warn' : 'mem';
+    const imgTag  = c.image.includes(':') ? c.image.split(':').pop() : c.image;
+    const imgBase = c.image.includes('/') ? c.image.split('/').pop().split(':')[0] : c.image.split(':')[0];
+    return `<div class="ct-row">
+      <div class="ct-name-cell">
+        <span class="ct-dot ${c.status}"></span>
+        <span class="ct-name-text" title="${c.name}">${c.name}</span>
+      </div>
+      <div><span class="ct-status-badge ${c.status}">${c.status}</span></div>
+      <div>
+        <div class="ct-cpu-pct">${c.status === 'running' ? c.cpuPct.toFixed(1) + '%' : '—'}</div>
+        <div class="mini-bar-wrap"><div class="mini-bar-fill cpu" style="width:${cpuBarPct}%"></div></div>
+      </div>
+      <div>
+        <div class="ct-stat-val">${c.memLimit > 0 ? fmtBytes(c.memUsed) + ' / ' + fmtBytes(c.memLimit) : '—'}</div>
+        <div class="mini-bar-wrap"><div class="mini-bar-fill ${memBarClass}" style="width:${memBarPct}%"></div></div>
+      </div>
+      <div class="ct-image-tag" title="${c.image}">${imgBase}:<span style="color:var(--text2)">${imgTag}</span></div>
+    </div>`;
+  }).join('');
+
+  const maxSize      = Math.max(...(d.images || []).map(i => i.size), 1);
+  const totalImgSize = (d.images || []).reduce((s, i) => s + i.size, 0);
+  document.getElementById('sys-images-total').textContent = (d.images || []).length + ' images — ' + fmtBytes(totalImgSize);
+  document.getElementById('img-body').innerHTML = (d.images || []).map(img => {
+    const barPct    = Math.round(img.size / maxSize * 100);
+    const shortRepo = img.repo.includes('/') ? img.repo.split('/').slice(-2).join('/') : img.repo;
+    const badge     = img.dangling
+      ? '<span class="dangling-badge">dangling</span>'
+      : img.inUse
+        ? '<span class="inuse-badge">in use</span>'
+        : '<span style="font-size:0.65rem;color:var(--text3)">unused</span>';
+    return `<tr>
+      <td class="img-repo" title="${img.repo}">${shortRepo}</td>
+      <td class="img-tag">${img.tag}</td>
+      <td class="img-size">
+        ${fmtBytes(img.size)}
+        <div class="img-size-bar"><div class="img-size-fill" style="width:${barPct}%"></div></div>
+      </td>
+      <td>${badge}</td>
+    </tr>`;
+  }).join('');
+
+  const now = new Date();
+  document.getElementById('sys-refresh-ts').textContent = 'Updated ' + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+// ── Config editor ──
+let cfgCurrentFile = '.env';
+const cfgTabMap = { '.env': 'cfg-tab-env', 'docker-compose.yml': 'cfg-tab-compose', 'Caddyfile': 'cfg-tab-caddyfile', 'claw-defaults': 'cfg-tab-clawdefaults' };
+const cfgHints  = {
+  '.env': 'Changes to .env require <code style="color:var(--text2)">docker compose up -d</code> to take effect',
+  'docker-compose.yml': 'Changes to compose/.env require <code style="color:var(--text2)">docker compose up -d</code> to take effect',
+  'Caddyfile': 'Caddy reloads automatically when the Caddyfile is saved',
+  'claw-defaults': 'Applied to all new instances at creation time — existing instances are not affected',
+};
+
+async function cfgLoad(file) {
+  cfgCurrentFile = file;
+  Object.entries(cfgTabMap).forEach(([f, id]) =>
+    document.getElementById(id).classList.toggle('active', f === file));
+  const editor = document.getElementById('cfg-editor');
+  editor.value = 'Loading…';
+  document.getElementById('cfg-status').textContent = '';
+  document.getElementById('cfg-footer-hint').innerHTML = cfgHints[file] || '';
+  const url = file === 'claw-defaults' ? '/api/system/claw-defaults' : '/api/system/config/' + encodeURIComponent(file);
+  const d   = await api('GET', url);
+  editor.value = d.error ? ('Error: ' + d.error) : d.content;
+}
+
+async function cfgSave() {
+  const btn = document.getElementById('cfg-save-btn');
+  const st  = document.getElementById('cfg-status');
+  btn.disabled = true;
+  const content = document.getElementById('cfg-editor').value;
+  const url = cfgCurrentFile === 'claw-defaults' ? '/api/system/claw-defaults' : '/api/system/config/' + encodeURIComponent(cfgCurrentFile);
+  const d   = await api('POST', url, { content });
+  btn.disabled = false;
+  if (d.error) { st.style.color = 'var(--red)'; st.textContent = 'Error: ' + d.error; }
+  else         { st.style.color = 'var(--green)'; st.textContent = 'Saved.'; setTimeout(() => st.textContent = '', 3000); }
+}
+
+document.getElementById('cfg-editor').addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  e.preventDefault();
+  const t = e.target, s = t.selectionStart, end = t.selectionEnd;
+  t.value = t.value.slice(0, s) + '  ' + t.value.slice(end);
+  t.selectionStart = t.selectionEnd = s + 2;
+});
+
+async function pruneImages() {
+  const btn = document.getElementById('prune-btn');
+  btn.disabled = true; btn.textContent = 'Pruning…';
+  const d  = await api('POST', '/api/system/prune');
+  btn.disabled = false; btn.textContent = 'Prune unused';
+  const el = document.getElementById('prune-result');
+  el.style.display = '';
+  if (d.error) { el.style.color = 'var(--red)'; el.textContent = 'Error: ' + d.error; }
+  else         { el.style.color = 'var(--green)'; el.textContent = 'Removed ' + d.count + ' image(s), freed ' + fmtBytes(d.freed) + '.'; }
+  loadSystem();
+}
+
+document.getElementById('mgr-editor').addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  e.preventDefault();
+  const t = e.target, s = t.selectionStart, end = t.selectionEnd;
+  t.value = t.value.slice(0, s) + '  ' + t.value.slice(end);
+  t.selectionStart = t.selectionEnd = s + 2;
+});
+
+// ── Boot ──
+init();

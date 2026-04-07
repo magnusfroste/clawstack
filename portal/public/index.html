@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ClawStack — Multi-tenant OpenClaw hosting</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="ClawStack admin portal — manage OpenClaw AI agent instances, monitor containers, and configure your stack.">
+  <meta name="robots" content="noindex, nofollow">
+  <meta property="og:title" content="ClawStack">
+  <meta property="og:description" content="Multi-tenant OpenClaw hosting platform">
+  <meta property="og:type" content="website">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦞</text></svg>">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="header">
+    <div class="logo">
+      <div class="logo-mark">🦞</div>
+      <div>
+        <div class="logo-text">ClawStack</div>
+        <div class="logo-sub">OpenClaw instance manager</div>
+      </div>
+    </div>
+    <div class="page-nav">
+      <button class="page-nav-btn active" id="nav-instances"  onclick="showPage('instances')">Instances</button>
+      <button class="page-nav-btn"        id="nav-system"     onclick="showPage('system')">System</button>
+      <button class="page-nav-btn"        id="nav-paperclip"  onclick="showPage('paperclip')">Paperclip</button>
+    </div>
+  </div>
+
+<!-- ══ Instances page ══ -->
+<div id="instances-page">
+  <div class="section">
+    <div class="section-head"><span class="section-title">New instance</span></div>
+    <div class="card">
+      <form method="post" action="/admin/instances">
+        <div class="form-grid">
+          <div class="field full">
+            <label>Role</label>
+            <select name="role" id="role" onchange="onRoleChange(this)"></select>
+          </div>
+          <div class="field"><label>Name</label><input name="name" placeholder="acme" required></div>
+          <div class="field">
+            <label>Domain</label>
+            <input name="domain" id="domain-input" placeholder="ai.acme.com" required oninput="onDomainInput(this)">
+            <div id="cname-notice" class="cname-notice">
+              Point DNS: <code id="cname-domain"></code> → <code id="cname-target">this-server</code> (CNAME)
+            </div>
+          </div>
+          <div class="field">
+            <label>Provider</label>
+            <select name="provider" id="provider" onchange="onProviderChange(this)"></select>
+          </div>
+          <div class="field">
+            <label>Model <span style="font-weight:400;color:var(--text3)">— starting model, change anytime in OpenClaw</span></label>
+            <input name="model" id="model" required placeholder="provider/model-id">
+          </div>
+          <div class="field full"><label>OpenClaw image</label><input name="image" id="image" placeholder="ghcr.io/openclaw/openclaw:2026.3.24" autocomplete="off"></div>
+          <div class="field full" id="baseurl-row" style="display:none"><label>Base URL</label><input name="baseUrl" id="baseUrl" type="url" placeholder="http://localhost:11434/v1" autocomplete="off"></div>
+          <div class="field full" id="apikey-row"><label>API Key</label><input name="apiKey" id="apiKey" type="password" placeholder="sk-..." autocomplete="off"></div>
+          <div class="full" style="margin-top:4px;display:flex;align-items:center;justify-content:space-between;gap:1rem">
+            <div style="display:flex;gap:1.25rem">
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:0.78rem;color:var(--text3);text-transform:none;letter-spacing:0;font-weight:400">
+                <input type="checkbox" name="enableA2A" value="1" style="width:auto;accent-color:var(--blue)">
+                Enable A2A (agent-to-agent protocol)
+              </label>
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:0.78rem;color:var(--text3);text-transform:none;letter-spacing:0;font-weight:400" title="Allow everything: bot acts immediately without asking (YOLO mode)">
+                <input type="checkbox" name="allowAll" value="1" style="width:auto;accent-color:var(--blue)">
+                Allow all actions (YOLO mode)
+              </label>
+            </div>
+            <button type="submit" class="btn primary">Create instance</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Instances</span>
+      <span style="font-size:0.72rem;color:var(--text3)" id="instances-count"></span>
+    </div>
+    <div id="instances-list"><div class="empty">Loading…</div></div>
+  </div>
+</div><!-- /instances-page -->
+
+<!-- ══ System page ══ -->
+<div id="system-page" style="display:none">
+  <div class="sys-grid">
+    <div class="stat-card">
+      <div class="ring-wrap">
+        <svg class="ring-svg" viewBox="0 0 36 36">
+          <circle class="ring-track" cx="18" cy="18" r="15.9"/>
+          <circle class="ring-prog" id="ring-cpu" cx="18" cy="18" r="15.9" stroke="var(--blue)" stroke-dasharray="0 100" stroke-dashoffset="0"/>
+        </svg>
+        <div class="ring-val" id="ring-cpu-val">—</div>
+      </div>
+      <div class="stat-info">
+        <div class="stat-label">CPU</div>
+        <div class="stat-main" id="stat-cpu-main">—</div>
+        <div class="stat-sub" id="stat-cpu-sub">usage</div>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="ring-wrap">
+        <svg class="ring-svg" viewBox="0 0 36 36">
+          <circle class="ring-track" cx="18" cy="18" r="15.9"/>
+          <circle class="ring-prog" id="ring-mem" cx="18" cy="18" r="15.9" stroke="var(--green)" stroke-dasharray="0 100" stroke-dashoffset="0"/>
+        </svg>
+        <div class="ring-val" id="ring-mem-val">—</div>
+      </div>
+      <div class="stat-info">
+        <div class="stat-label">Memory</div>
+        <div class="stat-main" id="stat-mem-main">—</div>
+        <div class="stat-sub" id="stat-mem-sub">of total</div>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="ring-wrap">
+        <svg class="ring-svg" viewBox="0 0 36 36">
+          <circle class="ring-track" cx="18" cy="18" r="15.9"/>
+          <circle class="ring-prog" id="ring-disk" cx="18" cy="18" r="15.9" stroke="var(--amber)" stroke-dasharray="0 100" stroke-dashoffset="0"/>
+        </svg>
+        <div class="ring-val" id="ring-disk-val">—</div>
+      </div>
+      <div class="stat-info">
+        <div class="stat-label">Disk</div>
+        <div class="stat-main" id="stat-disk-main">—</div>
+        <div class="stat-sub" id="stat-disk-sub">of total</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Containers</span>
+      <span class="sys-refresh" id="sys-refresh-ts"></span>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="ct-head"><div>Name</div><div>Status</div><div>CPU</div><div>Memory</div><div>Image</div></div>
+      <div id="ct-body"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><span class="section-title">Stack config</span></div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="cfg-tabs">
+        <button class="cfg-tab active" id="cfg-tab-env"          onclick="cfgLoad('.env')">.env</button>
+        <button class="cfg-tab"        id="cfg-tab-compose"      onclick="cfgLoad('docker-compose.yml')">docker-compose.yml</button>
+        <button class="cfg-tab"        id="cfg-tab-caddyfile"    onclick="cfgLoad('Caddyfile')">Caddyfile</button>
+        <button class="cfg-tab"        id="cfg-tab-clawdefaults" onclick="cfgLoad('claw-defaults')">Claw defaults</button>
+      </div>
+      <textarea id="cfg-editor" class="cfg-editor" spellcheck="false"></textarea>
+      <div class="cfg-footer">
+        <button class="btn sm" onclick="cfgSave()" id="cfg-save-btn">Save</button>
+        <span id="cfg-status" style="font-size:0.75rem;color:var(--text3)"></span>
+        <span style="flex:1"></span>
+        <span id="cfg-footer-hint" style="font-size:0.7rem;color:var(--text3)">Changes to compose/.env require <code style="color:var(--text2)">docker compose up -d</code> to take effect</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Images</span>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="sys-images-total" class="sys-refresh"></span>
+        <button class="btn danger sm" onclick="pruneImages()" id="prune-btn">Prune unused</button>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table class="img-table">
+        <thead><tr><th>Repository</th><th>Tag</th><th>Size</th><th>Status</th></tr></thead>
+        <tbody id="img-body"></tbody>
+      </table>
+    </div>
+    <div id="prune-result" style="display:none;margin-top:.5rem;font-size:0.78rem;color:var(--green)"></div>
+  </div>
+</div><!-- /system-page -->
+
+<!-- ══ Paperclip page ══ -->
+<div id="paperclip-page" style="display:none">
+  <div class="pp-status-row">
+    <div class="pp-status-card">
+      <div class="pp-status-label">Paperclip</div>
+      <div class="pp-status-val"><span class="pp-dot" id="pp-dot-app"></span><span id="pp-val-app">—</span></div>
+      <div class="pp-sub" id="pp-sub-app"></div>
+    </div>
+    <div class="pp-status-card">
+      <div class="pp-status-label">Database</div>
+      <div class="pp-status-val"><span class="pp-dot" id="pp-dot-db"></span><span id="pp-val-db">—</span></div>
+      <div class="pp-sub" id="pp-sub-db"></div>
+    </div>
+    <div class="pp-status-card">
+      <div class="pp-status-label">API</div>
+      <div class="pp-status-val"><span class="pp-dot" id="pp-dot-api"></span><span id="pp-val-api">—</span></div>
+      <div class="pp-sub" id="pp-sub-api"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Instances</span>
+      <button class="btn ghost sm" onclick="ppFix()" id="pp-fix-btn">Run Fix</button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table class="pp-inst-table">
+        <thead><tr><th>Instance</th><th>Paperclip</th><th>Last heartbeat</th><th>Action</th></tr></thead>
+        <tbody id="pp-inst-body"><tr><td colspan="4" style="color:var(--text3);padding:2rem;text-align:center">Loading…</td></tr></tbody>
+      </table>
+    </div>
+    <div id="pp-fix-results" style="margin-top:.75rem;display:none" class="card"></div>
+  </div>
+
+  <div class="section" id="pp-agents-section" style="display:none">
+    <div class="section-head"><span class="section-title">Connected agents</span></div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table class="pp-agents-table">
+        <thead><tr><th>Name</th><th>Role</th><th>Gateway URL</th><th>Last heartbeat</th></tr></thead>
+        <tbody id="pp-agents-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Interactive PTY terminal -->
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Terminal (PTY)</span>
+      <div style="display:flex;gap:6px;align-items:center">
+        <select id="pp-pty-user" style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;width:auto">
+          <option value="node" selected>node</option>
+          <option value="root">root</option>
+        </select>
+        <button class="btn ghost sm" id="pp-pty-open-btn" onclick="ppOpenTerminal()">Open</button>
+        <button class="btn danger sm" id="pp-pty-close-btn" onclick="ppCloseTerminal()" style="display:none">Close</button>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden;display:none" id="pp-pty-card">
+      <div id="pp-pty-container" class="pty-container" style="height:420px"></div>
+    </div>
+  </div>
+
+  <!-- Ask Claude -->
+  <div class="section">
+    <div class="section-head"><span class="section-title">Ask Claude</span></div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="term-panel" style="display:flex;flex-direction:column">
+        <div id="pp-claude-output" class="term-output" style="color:#93c5fd"># Claude Code (node user, --print mode)
+</div>
+        <div class="term-input-row" style="gap:8px;align-items:flex-start">
+          <span class="term-prefix" style="color:#4ade80;margin-top:7px">$</span>
+          <textarea id="pp-claude-prompt" rows="2" style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 11px;border-radius:var(--radius-sm);font-size:0.82rem;font-family:monospace;outline:none;resize:vertical;line-height:1.4"
+            placeholder="Ask Claude something…"
+            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();ppRunClaude()}"></textarea>
+          <button class="term-run" style="margin-top:1px" onclick="ppRunClaude()">Ask</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Exec shell -->
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Paperclip shell</span>
+      <button class="btn ghost sm" onclick="ppLoadLogs()">↻ Logs</button>
+      <button class="btn ghost sm" onclick="ppRestart()" id="pp-restart-btn">↺ Restart & reload .env</button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="term-panel" style="display:flex;flex-direction:column">
+        <div class="term-hints">
+          <button onclick="ppShortcut('which claude && claude --version || echo not installed','node')" title="Check if Claude CLI is installed">claude version</button>
+          <button onclick="ppShortcut('curl -fsSL https://claude.ai/install.sh | bash 2>&1','node')" title="Install Claude Code CLI">install claude cli</button>
+          <button onclick="ppShortcut('claude --dangerously-skip-permissions --add-mcp paperclip 2>&1 || echo See Paperclip UI → Add agent → Claude Code','node')" title="Register as Claude Code agent">add claude agent</button>
+          <button onclick="ppShortcut('cat ~/.bashrc | grep ANTHROPIC || echo no private LLM configured','node')" title="Check private LLM config">check llm config</button>
+          <button onclick="ppShortcut('curl -fsSL https://opencode.ai/install | bash && chown -R node:node /paperclip/.opencode /paperclip/.cache/opencode /paperclip/.local && echo PATH=/paperclip/.opencode/bin:$PATH >> /paperclip/.bashrc && echo done','root')" title="Install opencode">install opencode</button>
+          <button onclick="ppShortcut('export PATH=/paperclip/.opencode/bin:$PATH && opencode --version 2>&1 || echo not installed','node')" title="Check opencode version">opencode version</button>
+          <button onclick="ppLoadLogs()">show logs</button>
+        </div>
+        <div id="pp-exec-output" class="term-output"># Paperclip container shell
+</div>
+        <div class="term-input-row">
+          <select id="pp-exec-user" onchange="ppUpdatePrompt()" style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:2px 4px;font-size:11px;cursor:pointer;width:auto;flex-shrink:0">
+            <option value="root">root</option>
+            <option value="node">node</option>
+          </select>
+          <span id="pp-exec-prefix" class="term-prefix" style="color:#f87171">#</span>
+          <input id="pp-exec-cmd" class="term-cmd" placeholder="npm install -g @anthropic-ai/claude-code" autocomplete="off" spellcheck="false"
+            onkeydown="if(event.key==='Enter') ppRunExec()">
+          <button class="term-run" onclick="ppRunExec()">Run</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div><!-- /paperclip-page -->
+
+</div><!-- /page -->
+
+<!-- ══ Manager Modal ══ -->
+<div id="mgr">
+  <div id="mgr-bar">
+    <button class="back" onclick="closeMgr()">← Back</button>
+    <span class="inst-label" id="mgr-title"></span>
+    <span id="mgr-badge" class="badge" style="margin-left:2px"></span>
+    <div class="spacer"></div>
+    <div class="bar-actions">
+      <button class="btn amber sm" onclick="mgrAction('restart')">Restart</button>
+      <button class="btn danger sm" onclick="mgrAction('stop')">Stop</button>
+      <button class="btn green sm"  onclick="mgrAction('start')">Start</button>
+      <span id="mgr-action-status"></span>
+    </div>
+  </div>
+  <div id="mgr-tabs">
+    <div class="tab active" id="tab-files"    onclick="switchTab('files')">Files</div>
+    <div class="tab"        id="tab-logs"     onclick="switchTab('logs')">Logs</div>
+    <div class="tab"        id="tab-chat"     onclick="switchTab('chat')">Chat</div>
+    <div class="tab"        id="tab-model"    onclick="switchTab('model')">Model</div>
+    <div class="tab"        id="tab-cli"      onclick="switchTab('cli')">CLI</div>
+    <div class="tab"        id="tab-exec"     onclick="switchTab('exec')">Exec (root)</div>
+    <div class="tab"        id="tab-terminal" onclick="switchTab('terminal')">Terminal</div>
+    <div class="tab"        id="tab-version"  onclick="switchTab('version')">Version</div>
+  </div>
+  <div id="mgr-body">
+    <div id="mgr-tree"></div>
+    <div id="mgr-right">
+      <div id="mgr-crumb">—</div>
+      <textarea id="mgr-editor" spellcheck="false" placeholder="Select a file from the tree…"></textarea>
+      <pre id="mgr-logs"></pre>
+
+      <!-- CLI panel -->
+      <div id="mgr-cli" class="term-panel">
+        <div class="term-hints">
+          <button onclick="cliShortcut('openclaw plugins list')">plugins list</button>
+          <button onclick="cliShortcut('openclaw plugins install ')">plugins install …</button>
+          <button onclick="cliShortcut('openclaw config get')">config get</button>
+          <button onclick="cliShortcut('openclaw doctor')">doctor</button>
+          <button onclick="cliShortcut('openclaw --version')">version</button>
+          <button onclick="cliShortcut('npx playwright install chromium')" title="Download Chromium (~170 MB) — required for browser tool">install browser</button>
+        </div>
+        <div id="cli-output" class="term-output"># OpenClaw CLI — node user (uid 1000)
+</div>
+        <div class="term-input-row">
+          <span class="term-prefix" style="color:#86efac">$</span>
+          <input id="cli-cmd" class="term-cmd" placeholder="openclaw plugins install @openclaw/voice-call" autocomplete="off" spellcheck="false">
+          <button id="cli-run" class="term-run" onclick="runCli()">Run</button>
+        </div>
+      </div>
+
+      <!-- Exec panel -->
+      <div id="mgr-exec" class="term-panel">
+        <div id="exec-output" class="term-output"># Root shell — docker exec --user root
+</div>
+        <div class="term-input-row">
+          <span class="term-prefix" style="color:#f87171">#</span>
+          <input id="exec-cmd" class="term-cmd" placeholder="apt-get install -y curl" autocomplete="off" spellcheck="false">
+          <button id="exec-run" class="term-run" onclick="runExec()">Run</button>
+        </div>
+      </div>
+
+      <!-- PTY Terminal panel -->
+      <div id="mgr-terminal" class="term-panel" style="flex-direction:column;background:#09090b">
+        <div class="pty-toolbar">
+          <select id="mgr-pty-user" style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;width:auto">
+            <option value="node" selected>node</option>
+            <option value="root">root</option>
+          </select>
+          <button class="btn ghost sm" id="mgr-pty-open-btn" onclick="mgrOpenTerminal()">Open Terminal</button>
+          <button class="btn danger sm" id="mgr-pty-close-btn" onclick="mgrCloseTerminal()" style="display:none">Close</button>
+          <span id="mgr-pty-status" style="font-size:0.72rem;color:var(--text3);margin-left:8px"></span>
+        </div>
+        <div id="mgr-pty-container" class="pty-container" style="flex:1;min-height:400px"></div>
+      </div>
+
+      <!-- Version panel -->
+      <div id="mgr-version" class="term-panel" style="padding:1.5rem 2rem;gap:1.25rem;overflow-y:auto">
+        <div>
+          <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Current image</div>
+          <code id="version-current" style="font-size:0.82rem;color:var(--text2);background:var(--surface2);padding:4px 10px;border-radius:4px;display:inline-block"></code>
+        </div>
+        <div>
+          <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">New version tag</div>
+          <div style="display:flex;align-items:center;gap:0;max-width:520px">
+            <span id="version-base" style="font-size:0.82rem;color:var(--text3);background:var(--surface2);border:1px solid var(--border);border-right:none;padding:6px 10px;border-radius:var(--radius-sm) 0 0 var(--radius-sm);white-space:nowrap;font-family:monospace"></span>
+            <input id="version-input" class="term-cmd" style="border-radius:0 var(--radius-sm) var(--radius-sm) 0;min-width:0;flex:1" placeholder="2026.4.2" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="font-size:0.7rem;color:var(--text3);margin-top:5px">Enter just the version tag, e.g. <code style="color:var(--text2)">2026.4.2</code> or <code style="color:var(--text2)">latest</code></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <button id="version-btn" class="btn primary sm" onclick="recreateInstance()">Pull &amp; Recreate</button>
+          <span id="version-status" style="font-size:0.75rem;color:var(--text3)"></span>
+        </div>
+        <div style="font-size:0.72rem;color:var(--text3);line-height:1.6;max-width:520px;padding:8px 12px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">
+          Pulls the image, stops the container, removes it, and starts a fresh one with the same config and data. The API key is preserved from the existing container.
+        </div>
+      </div>
+
+      <!-- Chat panel -->
+      <div id="mgr-chat" style="display:none;flex-direction:column;height:100%;overflow:hidden">
+        <div id="chat-messages" style="flex:1;overflow-y:auto;padding:1rem 1.5rem;display:flex;flex-direction:column;gap:0.75rem"></div>
+        <div style="padding:0.75rem 1rem;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end">
+          <textarea id="chat-input" rows="2" placeholder="Message…" spellcheck="true"
+            style="flex:1;resize:none;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;color:var(--text);font-size:0.85rem;font-family:inherit;line-height:1.4"
+            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+          <button class="btn primary sm" onclick="sendChat()" id="chat-send" style="align-self:flex-end">Send</button>
+        </div>
+      </div>
+
+      <!-- Model panel -->
+      <div id="mgr-model" class="term-panel" style="padding:1.5rem 2rem;gap:1.25rem;overflow-y:auto">
+        <div style="display:flex;flex-direction:column;gap:1rem;max-width:520px">
+          <div>
+            <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Provider</div>
+            <select id="model-provider" style="width:100%;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem" onchange="onModelProviderChange()">
+              <option value="openrouter">OpenRouter</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="openai">OpenAI</option>
+              <option value="gemini">Gemini</option>
+              <option value="private">Private LLM</option>
+            </select>
+          </div>
+          <div id="model-baseurl-row" style="display:none">
+            <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Base URL</div>
+            <input id="model-baseurl" style="width:100%;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem;box-sizing:border-box" placeholder="https://your-llm-host/v1" autocomplete="off">
+          </div>
+          <div>
+            <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Model</div>
+            <input id="model-name" style="width:100%;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem;box-sizing:border-box" placeholder="e.g. openai/gpt-4o" autocomplete="off" spellcheck="false">
+            <div style="font-size:0.7rem;color:var(--text3);margin-top:4px">Full model ID as used by the provider</div>
+          </div>
+          <div>
+            <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">API Key</div>
+            <input id="model-apikey" type="password" style="width:100%;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:0.85rem;box-sizing:border-box" placeholder="Leave blank to keep existing" autocomplete="off">
+          </div>
+          <div style="display:flex;align-items:center;gap:12px">
+            <button class="btn primary sm" onclick="saveModel()">Save &amp; Restart</button>
+            <span id="model-status" style="font-size:0.75rem;color:var(--text3)"></span>
+          </div>
+          <div style="font-size:0.72rem;color:var(--text3);line-height:1.6;padding:8px 12px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">
+            Updates <code style="color:var(--text2)">openclaw.json</code> and restarts the container. The new model takes effect immediately.
+          </div>
+        </div>
+      </div>
+
+      <div id="mgr-footer">
+        <button id="btn-save"         class="btn sm"       onclick="saveFile()" disabled>Save</button>
+        <button id="btn-refresh-logs" class="btn ghost sm" style="display:none" onclick="loadLogs()">↻ Refresh</button>
+        <button id="btn-copy-logs"    class="btn ghost sm" style="display:none" onclick="copyLogs()">⎘ Copy</button>
+        <button id="btn-backup"       class="btn ghost sm" style="display:none" onclick="downloadBackup()">⬇ Backup</button>
+        <button id="btn-restore"      class="btn ghost sm" style="display:none" onclick="document.getElementById('restore-input').click()">⬆ Restore</button>
+        <input id="restore-input" type="file" accept=".tar.gz,.tgz" style="display:none" onchange="uploadRestore(this)">
+        <span id="mgr-status"></span>
+      </div>
+    </div>
+  </div>
+</div><!-- /mgr -->
+
+<script>window.__auth = %%AUTH%%;</script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
