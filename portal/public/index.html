@@ -141,8 +141,37 @@
       <span class="sys-refresh" id="sys-refresh-ts"></span>
     </div>
     <div class="card" style="padding:0;overflow:hidden">
-      <div class="ct-head"><div>Name</div><div>Status</div><div>CPU</div><div>Memory</div><div>Image</div></div>
+      <div class="ct-head"><div>Name</div><div>Status</div><div>CPU</div><div>Memory</div><div>Image</div><div>Actions</div></div>
       <div id="ct-body"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <span class="section-title">Run container</span>
+      <button class="btn ghost sm" onclick="document.getElementById('run-ct-form').style.display=document.getElementById('run-ct-form').style.display==='none'?'':'none'">+ New</button>
+    </div>
+    <div id="run-ct-form" style="display:none">
+      <div class="card" style="display:flex;flex-direction:column;gap:.75rem">
+        <div class="form-grid">
+          <div class="field full"><label>Image</label><input id="run-image" placeholder="nginx:latest" autocomplete="off" spellcheck="false"></div>
+          <div class="field"><label>Name <span style="font-weight:400;color:var(--text3)">(optional)</span></label><input id="run-name" placeholder="my-container" autocomplete="off"></div>
+          <div class="field"><label>Network</label><input id="run-network" value="clawstack" autocomplete="off"></div>
+          <div class="field full"><label>Env vars <span style="font-weight:400;color:var(--text3)">(one per line, KEY=VALUE)</span></label><textarea id="run-env" rows="3" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 11px;border-radius:var(--radius-sm);font-size:0.82rem;font-family:monospace;resize:vertical;outline:none" spellcheck="false" placeholder="FOO=bar&#10;BAR=baz"></textarea></div>
+          <div class="field"><label>Restart policy</label>
+            <select id="run-restart" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 11px;border-radius:var(--radius-sm);font-size:0.875rem">
+              <option value="unless-stopped">unless-stopped</option>
+              <option value="always">always</option>
+              <option value="on-failure">on-failure</option>
+              <option value="no">no</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="btn primary sm" onclick="runContainer()">Pull &amp; Run</button>
+          <span id="run-ct-status" style="font-size:0.75rem;color:var(--text3)"></span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -267,7 +296,7 @@
   <div class="section">
     <div class="section-head"><span class="section-title">Version</span></div>
     <div class="card" style="padding:0;overflow:hidden">
-      <div class="term-panel" style="padding:1.5rem 2rem;gap:1.25rem;overflow-y:auto">
+      <div style="display:flex;flex-direction:column;padding:1.5rem 2rem;gap:1.25rem;overflow-y:auto">
         <div>
           <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Current image</div>
           <code id="pp-version-current" style="font-size:0.82rem;color:var(--text2);background:var(--surface2);padding:4px 10px;border-radius:4px;display:inline-block">—</code>

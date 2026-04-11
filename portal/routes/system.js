@@ -149,6 +149,58 @@ function register(app) {
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
 
+  // ── Container actions: start / stop / restart ──
+  app.post('/api/system/containers/:id/action', requireAdmin, async (req, res) => {
+    const { action } = req.body;
+    if (!['start','stop','restart'].includes(action))
+      return res.status(400).json({ error: 'Invalid action' });
+    try {
+      const c = docker.getContainer(req.params.id);
+      if (action === 'start')   await c.start();
+      if (action === 'stop')    await c.stop({ t: 10 });
+      if (action === 'restart') await c.restart({ t: 10 });
+      const info = await c.inspect();
+      res.json({ status: info.State.Status });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ── Remove container ──
+  app.delete('/api/system/containers/:id', requireAdmin, async (req, res) => {
+    try {
+      const c = docker.getContainer(req.params.id);
+      await c.stop({ t: 5 }).catch(() => {});
+      await c.remove({ force: true });
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ── Run new container ──
+  app.post('/api/system/containers/run', requireAdmin, async (req, res) => {
+    const { image, name, network, env, restart } = req.body;
+    if (!image) return res.status(400).json({ error: 'image required' });
+    try {
+      await new Promise((resolve, reject) => {
+        docker.pull(image, (err, stream) => {
+          if (err) return reject(err);
+          docker.modem.followProgress(stream, err => err ? reject(err) : resolve());
+        });
+      });
+      const createOpts = {
+        Image: image,
+        Env: Array.isArray(env) ? env.filter(Boolean) : [],
+        HostConfig: {
+          NetworkMode: network || 'clawstack',
+          RestartPolicy: { Name: restart || 'unless-stopped' },
+        },
+      };
+      if (name) createOpts.name = name;
+      const container = await docker.createContainer(createOpts);
+      await container.start();
+      const info = await container.inspect();
+      res.json({ ok: true, id: info.Id.slice(0, 12), name: (info.Name || '').replace(/^\//, '') });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // ── Prune images ──
   app.post('/api/system/prune', requireAdmin, async (req, res) => {
     try {

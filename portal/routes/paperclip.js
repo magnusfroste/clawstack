@@ -62,7 +62,7 @@ function register(app) {
         Image: info.Config.Image,
         Env: newEnv,
         HostConfig: info.HostConfig,
-        NetworkingConfig: { EndpointsConfig: { clawstack: {} } },
+        NetworkingConfig: { EndpointsConfig: { clawstack: { Aliases: ['paperclip'] } } },
       });
       await created.start();
       res.json({ ok: true });
@@ -108,7 +108,7 @@ function register(app) {
         Image: newImage,
         Env: newEnv,
         HostConfig: info.HostConfig,
-        NetworkingConfig: { EndpointsConfig: { clawstack: {} } },
+        NetworkingConfig: { EndpointsConfig: { clawstack: { Aliases: ['paperclip'] } } },
       });
       await created.start();
       res.json({ ok: true, image: newImage });

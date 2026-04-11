@@ -984,14 +984,15 @@ async function loadSystem() {
     const memBarClass = c.memPct >= 90 ? 'danger' : c.memPct >= 70 ? 'warn' : 'mem';
     const imgTag  = c.image.includes(':') ? c.image.split(':').pop() : c.image;
     const imgBase = c.image.includes('/') ? c.image.split('/').pop().split(':')[0] : c.image.split(':')[0];
-    return `<div class="ct-row">
+    const running = c.status === 'running';
+    return `<div class="ct-row" id="ct-row-${c.id}">
       <div class="ct-name-cell">
         <span class="ct-dot ${c.status}"></span>
         <span class="ct-name-text" title="${c.name}">${c.name}</span>
       </div>
       <div><span class="ct-status-badge ${c.status}">${c.status}</span></div>
       <div>
-        <div class="ct-cpu-pct">${c.status === 'running' ? c.cpuPct.toFixed(1) + '%' : '—'}</div>
+        <div class="ct-cpu-pct">${running ? c.cpuPct.toFixed(1) + '%' : '—'}</div>
         <div class="mini-bar-wrap"><div class="mini-bar-fill cpu" style="width:${cpuBarPct}%"></div></div>
       </div>
       <div>
@@ -999,6 +1000,13 @@ async function loadSystem() {
         <div class="mini-bar-wrap"><div class="mini-bar-fill ${memBarClass}" style="width:${memBarPct}%"></div></div>
       </div>
       <div class="ct-image-tag" title="${c.image}">${imgBase}:<span style="color:var(--text2)">${imgTag}</span></div>
+      <div class="ct-actions">
+        ${running
+          ? `<button class="btn amber xs" onclick="ctAction('${c.id}','restart')">↺</button>
+             <button class="btn ghost xs"  onclick="ctAction('${c.id}','stop')">■</button>`
+          : `<button class="btn green xs"  onclick="ctAction('${c.id}','start')">▶</button>`}
+        <button class="btn danger xs" onclick="ctRemove('${c.id}','${esc(c.name)}')" title="Remove">✕</button>
+      </div>
     </div>`;
   }).join('');
 
@@ -1070,6 +1078,39 @@ document.getElementById('cfg-editor').addEventListener('keydown', e => {
   t.value = t.value.slice(0, s) + '  ' + t.value.slice(end);
   t.selectionStart = t.selectionEnd = s + 2;
 });
+
+async function ctAction(id, action) {
+  const row = document.getElementById('ct-row-' + id);
+  if (row) row.style.opacity = '0.5';
+  await api('POST', '/api/system/containers/' + id + '/action', { action });
+  loadSystem();
+}
+
+async function ctRemove(id, name) {
+  if (!confirm('Remove container ' + name + '?\n\nThe container will be stopped and deleted.')) return;
+  const row = document.getElementById('ct-row-' + id);
+  if (row) row.style.opacity = '0.5';
+  const d = await api('DELETE', '/api/system/containers/' + id);
+  if (d.error) alert('Error: ' + d.error);
+  loadSystem();
+}
+
+async function runContainer() {
+  const image   = document.getElementById('run-image').value.trim();
+  const name    = document.getElementById('run-name').value.trim();
+  const network = document.getElementById('run-network').value.trim();
+  const restart = document.getElementById('run-restart').value;
+  const env     = document.getElementById('run-env').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const status  = document.getElementById('run-ct-status');
+  if (!image) { status.textContent = 'Image is required'; return; }
+  status.style.color = 'var(--text3)'; status.textContent = 'Pulling & starting…';
+  const d = await api('POST', '/api/system/containers/run', { image, name: name || undefined, network, restart, env });
+  if (d.error) { status.style.color = 'var(--red)'; status.textContent = 'Error: ' + d.error; return; }
+  status.style.color = 'var(--green)'; status.textContent = 'Running: ' + d.name;
+  document.getElementById('run-ct-form').style.display = 'none';
+  setTimeout(() => { status.textContent = ''; status.style.color = ''; }, 4000);
+  loadSystem();
+}
 
 async function pruneImages() {
   const btn = document.getElementById('prune-btn');
