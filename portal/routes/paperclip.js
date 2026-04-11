@@ -69,6 +69,52 @@ function register(app) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ── Recreate with new image (version upgrade) ──
+  app.post('/api/paperclip/recreate', requireAdmin, async (req, res) => {
+    try {
+      let envVars = {};
+      try { envVars = parseEnvFile(fs.readFileSync('/clawstack-config/.env', 'utf8')); } catch {}
+
+      const r = (k, def = '') => (envVars[k] ?? def);
+      const newEnv = [
+        `BETTER_AUTH_SECRET=${r('PAPERCLIP_SECRETS_KEY')}`,
+        `PAPERCLIP_PUBLIC_URL=https://${r('PAPERCLIP_DOMAIN')}`,
+        `DATABASE_URL=postgres://paperclip:paperclip@paperclip-db:5432/paperclip`,
+        `ANTHROPIC_API_KEY=${r('ANTHROPIC_API_KEY')}`,
+        `CLAUDE_BASE_URL=${r('CLAUDE_BASE_URL')}`,
+        `CLAUDE_AUTH_TOKEN=${r('CLAUDE_AUTH_TOKEN')}`,
+        `CLAUDE_MODEL=${r('CLAUDE_MODEL')}`,
+        `ANTHROPIC_BASE_URL=${r('ANTHROPIC_BASE_URL')}`,
+        `ANTHROPIC_AUTH_TOKEN=${r('ANTHROPIC_AUTH_TOKEN')}`,
+        `ANTHROPIC_MODEL=${r('ANTHROPIC_MODEL')}`,
+      ];
+
+      const container = docker.getContainer(PAPERCLIP_CONTAINER);
+      const info      = await container.inspect();
+      const newImage  = (req.body.image || info.Config.Image).trim();
+
+      if (info.State.Running) await container.stop({ t: 10 });
+      await container.remove();
+
+      await new Promise((resolve, reject) => {
+        docker.pull(newImage, (err, stream) => {
+          if (err) return reject(err);
+          docker.modem.followProgress(stream, err => err ? reject(err) : resolve());
+        });
+      });
+
+      const created = await docker.createContainer({
+        name: PAPERCLIP_CONTAINER,
+        Image: newImage,
+        Env: newEnv,
+        HostConfig: info.HostConfig,
+        NetworkingConfig: { EndpointsConfig: { clawstack: {} } },
+      });
+      await created.start();
+      res.json({ ok: true, image: newImage });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // ── Logs ──
   app.get('/api/paperclip/logs', requireAdmin, async (req, res) => {
     try {
@@ -116,7 +162,7 @@ function register(app) {
     const pending = db.prepare('SELECT claw_name, created_at FROM paperclip_pending').all();
 
     res.json({
-      paperclip: { running: !!ppInfo?.State?.Running, status: ppInfo?.State?.Status || 'not found' },
+      paperclip: { running: !!ppInfo?.State?.Running, status: ppInfo?.State?.Status || 'not found', image: ppInfo?.Config?.Image || null },
       db:        { running: !!dbInfo?.State?.Running, status: dbInfo?.State?.Status || 'not found' },
       api: apiHealth,
       agents,

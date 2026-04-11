@@ -263,6 +263,30 @@
     </div>
   </div>
 
+  <!-- Version -->
+  <div class="section">
+    <div class="section-head"><span class="section-title">Version</span></div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="term-panel" style="padding:1.5rem 2rem;gap:1.25rem;overflow-y:auto">
+        <div>
+          <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Current image</div>
+          <code id="pp-version-current" style="font-size:0.82rem;color:var(--text2);background:var(--surface2);padding:4px 10px;border-radius:4px;display:inline-block">—</code>
+        </div>
+        <div>
+          <div style="font-size:0.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">New image</div>
+          <input id="pp-version-input" class="term-cmd" style="max-width:520px;border-radius:var(--radius-sm)" placeholder="e.g. ghcr.io/paperclip/paperclip:latest" autocomplete="off" spellcheck="false">
+        </div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="btn primary sm" onclick="ppRecreate()">Pull &amp; Recreate</button>
+          <span id="pp-version-status" style="font-size:0.75rem;color:var(--text3)"></span>
+        </div>
+        <div style="font-size:0.72rem;color:var(--text3);line-height:1.6;max-width:520px;padding:8px 12px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">
+          Pulls the image, stops Paperclip, removes it, and starts a fresh container with the same config and volumes. .env is reloaded automatically.
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Exec shell -->
   <div class="section">
     <div class="section-head">

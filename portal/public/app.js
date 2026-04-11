@@ -650,6 +650,11 @@ async function loadPaperclip() {
     document.getElementById('pp-sub-' + id).textContent = sub || '';
   };
   setCard('app', d.paperclip.running, d.paperclip.running ? 'Running' : d.paperclip.status);
+  if (d.paperclip.image) {
+    document.getElementById('pp-version-current').textContent = d.paperclip.image;
+    const inp = document.getElementById('pp-version-input');
+    if (!inp.value) inp.value = d.paperclip.image;
+  }
   setCard('db',  d.db.running,        d.db.running  ? 'Running' : d.db.status);
   setCard('api', !!d.api, d.api ? d.api.status : 'unreachable', d.api?.deploymentMode || '');
   if (d.api) document.getElementById('pp-dot-api').className = 'pp-dot ' + (d.api.status === 'ok' ? 'ok' : 'warn');
@@ -773,6 +778,18 @@ async function ppRestart() {
   out.scrollTop = 999999;
   btn.disabled = false; btn.textContent = '↺ Restart Paperclip';
 }
+async function ppRecreate() {
+  const image  = document.getElementById('pp-version-input').value.trim();
+  const status = document.getElementById('pp-version-status');
+  if (!image) { status.textContent = 'Enter an image first'; return; }
+  status.style.color = 'var(--text3)'; status.textContent = 'Pulling image… this may take a minute';
+  const d = await api('POST', '/api/paperclip/recreate', { image });
+  if (d.error) { status.style.color = 'var(--red)'; status.textContent = 'Error: ' + d.error; return; }
+  status.style.color = 'var(--green)'; status.textContent = 'Done — running ' + d.image;
+  document.getElementById('pp-version-current').textContent = d.image;
+  setTimeout(() => { status.textContent = ''; status.style.color = ''; loadPaperclip(); }, 4000);
+}
+
 async function ppRunClaude() {
   const ta  = document.getElementById('pp-claude-prompt');
   const out = document.getElementById('pp-claude-output');
