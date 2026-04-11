@@ -46,10 +46,15 @@ function register(app) {
 
   // ── Terminal token ──
   app.post('/api/terminal/token', requireAdmin, (req, res) => {
-    const { container, user } = req.body;
+    const { container, user, cols, rows } = req.body;
     if (!container || typeof container !== 'string')
       return res.status(400).json({ error: 'container required' });
-    const token = createTerminalToken(container, user === 'node' ? 'node' : 'root');
+    const token = createTerminalToken(
+      container,
+      user === 'node' ? 'node' : 'root',
+      cols > 0 ? cols : undefined,
+      rows > 0 ? rows : undefined
+    );
     res.json({ token });
   });
 

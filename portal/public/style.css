@@ -52,6 +52,7 @@ input::placeholder{color:var(--text3)}
 .inst-card:hover{border-color:var(--border2)}
 .inst-main{flex:1;min-width:0}
 .inst-name{font-size:0.925rem;font-weight:600;color:var(--text);display:flex;align-items:center;gap:8px}
+.inst-name-link{color:inherit;text-decoration:none;cursor:pointer}.inst-name-link:hover{color:var(--blue)}
 .inst-meta{font-size:0.72rem;color:var(--text3);margin-top:3px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .inst-domain{font-size:0.8rem;color:var(--blue);text-decoration:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .inst-domain:hover{text-decoration:underline}

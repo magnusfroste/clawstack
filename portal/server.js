@@ -37,11 +37,15 @@ require('./routes/instances').register(app);
 require('./routes/paperclip').register(app);
 
 // ── SPA / index.html (admin portal) ──────────────────────────────────────────
-app.get('/', requireAdmin, (req, res) => {
+function servePortal(req, res) {
   const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
   const creds = Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString('base64');
   res.send(html.replace('%%AUTH%%', JSON.stringify(`Basic ${creds}`)));
-});
+}
+app.get('/', requireAdmin, servePortal);
+app.get('/instances/:name', requireAdmin, servePortal);
+app.get('/paperclip',      requireAdmin, servePortal);
+app.get('/system',         requireAdmin, servePortal);
 
 // ── HTTP server + WebSocket upgrade ──────────────────────────────────────────
 const server = http.createServer(app);
@@ -62,7 +66,7 @@ server.on('upgrade', (req, socket, head) => {
     }
     tokenStore.delete(token);
     wss.handleUpgrade(req, socket, head, ws => {
-      wss.emit('connection', ws, { container: entry.container, user: entry.user });
+      wss.emit('connection', ws, entry);
     });
     return;
   }

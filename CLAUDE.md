@@ -38,11 +38,22 @@ HTTPS request → Caddy → portal:3000
 
 **The proxy middleware is registered first in `server.js`**, before auth and body parsing. Any request for a known customer domain is forwarded immediately without hitting auth.
 
-### Portal (`portal/server.js`)
+### Portal (`portal/`)
 
-Single-file Node.js app with no build step. Dependencies: Express, Dockerode, better-sqlite3, http-proxy-middleware.
+Node.js/Express app with no build step. Dependencies: Express, Dockerode, better-sqlite3, http-proxy-middleware. Entry point is `server.js`; logic is split across:
 
-- **DB:** SQLite at `/data/clawstack.db` (inside the portal container, persisted via named volume `portal_data`). Single `instances` table.
+- `lib/config.js` — env vars and constants (provider configs, paths, defaults)
+- `lib/db.js` — SQLite connection and schema bootstrap
+- `lib/auth.js` — `requireAdmin` middleware (HTTP Basic auth)
+- `lib/docker.js` — Dockerode client, `getProxy()` / `proxyWs()`, `containerExec()`
+- `lib/bootstrap.js` — `bootstrapInstance()`: writes OpenClaw config + workspace files
+- `lib/terminal.js` — WebSocket server for in-browser terminal (exec into containers)
+- `routes/instances.js` — instance CRUD, start/stop, file browser, chat endpoint
+- `routes/system.js` — system info, domain verify, ask-claude endpoint
+- `routes/paperclip.js` — Paperclip restart and proxy routes
+
+Key facts:
+- **DB:** SQLite at `/data/clawstack.db` (persisted via named volume `portal_data`). Single `instances` table.
 - **Auth:** HTTP Basic auth on all `/api/*` routes except `/api/verify-domain`.
 - **Bootstrap:** When an instance is created, `bootstrapInstance()` writes OpenClaw config files to `/instances/<name>/config/` and workspace files to `/instances/<name>/workspace/`. These are bind-mounted into the OpenClaw container at `/home/node/.openclaw` and `/home/node/.openclaw/workspace`. The host path is `/opt/clawstack/instances/<name>/`.
 - **Container lifecycle:** Dockerode manages OpenClaw containers directly via the Docker socket. Each container is named `clawstack-<name>`, runs on the `clawstack` network, and is memory-limited to 900 MB.

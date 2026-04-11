@@ -37,7 +37,27 @@ async function init() {
 
   // Load instances list
   await loadInstances();
+
+  // Handle direct URL loads
+  const path = location.pathname;
+  const instMatch = path.match(/^\/instances\/([^/]+)$/);
+  if (instMatch) {
+    const name = decodeURIComponent(instMatch[1]);
+    history.replaceState({ instance: name, tab: 'files' }, '', path);
+    const found = (__cachedInstances || []).find(i => i.name === name);
+    openMgr(name, 'files', found ? (found.image || __initData.defaultImage || '') : '', false);
+  } else if (path === '/system') {
+    history.replaceState({ page: 'system' }, '', path);
+    showPage('system', false);
+  } else if (path === '/paperclip') {
+    history.replaceState({ page: 'paperclip' }, '', path);
+    showPage('paperclip', false);
+  } else {
+    history.replaceState({ page: 'instances' }, '', '/');
+  }
 }
+
+let __cachedInstances = [];
 
 async function loadInstances() {
   const list = document.getElementById('instances-list');
@@ -47,6 +67,7 @@ async function loadInstances() {
     list.innerHTML = `<div class="empty">Error loading instances: ${esc(String(d.error || 'unknown'))}</div>`;
     return;
   }
+  __cachedInstances = d;
   const defaultImage = __initData.defaultImage || '';
   countEl.textContent = `${d.length} total`;
   if (d.length === 0) {
@@ -59,7 +80,7 @@ async function loadInstances() {
     return `<div class="inst-card">
       <div class="inst-main">
         <div class="inst-name">
-          ${esc(i.name)}
+          <a class="inst-name-link" href="/instances/${esc(i.name)}" onclick="event.preventDefault();openMgr('${esc(i.name)}','files','${esc(img)}')">${esc(i.name)}</a>
           <span class="badge ${i.status}" id="badge-${i.name}">${i.status}</span>
           ${i.role && i.role !== 'generalist' ? `<span class="badge role">${esc(i.role)}</span>` : ''}
         </div>
@@ -164,7 +185,7 @@ function onDomainInput(inp) {
 // ── Manager modal ──
 let mgrName = null, mgrPath = null, mgrTab = 'files', mgrImage = null;
 
-function openMgr(name, tab = 'files', image = '') {
+function openMgr(name, tab = 'files', image = '', pushUrl = true) {
   mgrName = name; mgrPath = null; mgrImage = image;
   document.getElementById('mgr-title').textContent = name;
   document.getElementById('mgr-editor').value = '';
@@ -173,14 +194,28 @@ function openMgr(name, tab = 'files', image = '') {
   document.getElementById('mgr-tree').innerHTML = '';
   document.getElementById('chat-messages').innerHTML = '';
   document.getElementById('mgr').classList.add('open');
+  if (pushUrl && location.pathname !== '/instances/' + name) {
+    history.pushState({ instance: name, tab }, '', '/instances/' + name);
+  }
   refreshMgrBadge();
   switchTab(tab);
 }
-function closeMgr() {
+function closeMgr(pushUrl = true) {
   mgrCloseTerminal();
   document.getElementById('mgr').classList.remove('open');
   mgrName = null;
+  if (pushUrl && location.pathname !== '/') {
+    history.pushState({}, '', '/');
+  }
 }
+
+window.addEventListener('popstate', e => {
+  if (e.state && e.state.instance) {
+    openMgr(e.state.instance, e.state.tab || 'files', '', false);
+  } else {
+    closeMgr(false);
+  }
+});
 
 async function refreshMgrBadge() {
   const d = await api('GET', '/api/instances/' + mgrName + '/status');
@@ -569,7 +604,7 @@ async function recreateInstance() {
 // ── Page navigation ──
 let sysTimer = null, ppTimer = null;
 
-function showPage(name) {
+function showPage(name, pushUrl = true) {
   ['instances', 'system', 'paperclip'].forEach(p => {
     document.getElementById(p + '-page').style.display = name === p ? '' : 'none';
     document.getElementById('nav-' + p).classList.toggle('active', name === p);
@@ -577,7 +612,25 @@ function showPage(name) {
   clearInterval(sysTimer); clearInterval(ppTimer);
   if (name === 'system')    { loadSystem(); cfgLoad('.env'); sysTimer = setInterval(loadSystem, 5000); }
   if (name === 'paperclip') { loadPaperclip(); ppTimer = setInterval(loadPaperclip, 8000); }
+  const urlMap = { instances: '/', system: '/system', paperclip: '/paperclip' };
+  if (pushUrl && urlMap[name] && location.pathname !== urlMap[name]) {
+    history.pushState({ page: name }, '', urlMap[name]);
+  }
 }
+
+window.addEventListener('popstate', e => {
+  if (e.state && e.state.page) {
+    showPage(e.state.page, false);
+  } else if (e.state && e.state.instance) {
+    openMgr(e.state.instance, e.state.tab || 'files', '', false);
+  } else {
+    // Fallback: determine page from URL
+    const p = location.pathname;
+    if (p === '/system') showPage('system', false);
+    else if (p === '/paperclip') showPage('paperclip', false);
+    else { closeMgr(false); showPage('instances', false); }
+  }
+});
 
 // ── Paperclip page ──
 function fmtHB(secondsAgo) {
@@ -750,32 +803,38 @@ const XTERM_THEME = {
   brightCyan: '#67e8f9', brightWhite: '#f9fafb',
 };
 
-async function openPtyTerminal(containerId, user, containerId2 = null) {
-  const d = await api('POST', '/api/terminal/token', { container: containerId, user });
-  if (d.error) { alert('Terminal error: ' + d.error); return null; }
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws    = new WebSocket(`${proto}//${location.host}/ws/terminal?token=${d.token}`);
-  ws.binaryType = 'arraybuffer';
-
+async function openPtyTerminal(containerId, user, containerEl) {
+  // Open and fit the terminal first so we know the real cols/rows before
+  // the exec starts — critical for TUI apps like opencode that render
+  // immediately on startup and don't handle late resizes gracefully.
   const term     = new Terminal({ theme: XTERM_THEME, fontSize: 13, fontFamily: 'Fira Code, Consolas, monospace', cursorBlink: true });
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
+  term.open(containerEl);
+  fitAddon.fit();
+
+  const cols = term.cols;
+  const rows = term.rows;
+
+  const d = await api('POST', '/api/terminal/token', { container: containerId, user, cols, rows });
+  if (d.error) { term.dispose(); alert('Terminal error: ' + d.error); return null; }
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws    = new WebSocket(`${proto}//${location.host}/ws/terminal?token=${d.token}`);
+  ws.binaryType = 'arraybuffer';
 
   return { term, fitAddon, ws };
 }
 
 function wireTerminal(term, fitAddon, ws, containerEl) {
-  term.open(containerEl);
-  setTimeout(() => fitAddon.fit(), 50);
-
+  // term is already opened on containerEl by openPtyTerminal
   ws.onopen = () => {
+    // Size is already set server-side; send once more in case connection was slow
     ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
   };
-  ws.onmessage = e => {
-    term.write(new Uint8Array(e.data));
-  };
-  ws.onclose = () => { term.write('\r\n[Connection closed]\r\n'); };
-  ws.onerror = () => { term.write('\r\n[WebSocket error]\r\n'); };
+  ws.onmessage = e => { term.write(new Uint8Array(e.data)); };
+  ws.onclose   = () => { term.write('\r\n[Connection closed]\r\n'); };
+  ws.onerror   = () => { term.write('\r\n[WebSocket error]\r\n'); };
 
   term.onData(data => {
     if (ws.readyState === 1) ws.send(new TextEncoder().encode(data));
@@ -795,17 +854,17 @@ let ppPtyTerm = null, ppPtyWs = null, ppPtyRo = null;
 async function ppOpenTerminal() {
   const user      = document.getElementById('pp-pty-user').value;
   const container = 'clawstack-paperclip-1';
-  const result    = await openPtyTerminal(container, user);
-  if (!result) return;
-  const { term, fitAddon, ws } = result;
-  ppPtyTerm = term; ppPtyWs = ws;
-
-  const card = document.getElementById('pp-pty-card');
+  const card      = document.getElementById('pp-pty-card');
   card.style.display = '';
   document.getElementById('pp-pty-open-btn').style.display  = 'none';
   document.getElementById('pp-pty-close-btn').style.display = '';
 
-  ppPtyRo = wireTerminal(term, fitAddon, ws, document.getElementById('pp-pty-container'));
+  const containerEl = document.getElementById('pp-pty-container');
+  const result = await openPtyTerminal(container, user, containerEl);
+  if (!result) { card.style.display = 'none'; document.getElementById('pp-pty-open-btn').style.display = ''; document.getElementById('pp-pty-close-btn').style.display = 'none'; return; }
+  const { term, fitAddon, ws } = result;
+  ppPtyTerm = term; ppPtyWs = ws;
+  ppPtyRo = wireTerminal(term, fitAddon, ws, containerEl);
 }
 
 function ppCloseTerminal() {
@@ -833,17 +892,16 @@ async function mgrOpenTerminal() {
   if (!row) { status.textContent = 'Instance not found'; return; }
 
   status.textContent = 'Connecting…';
-  const result = await openPtyTerminal(row.container_name, user);
-  if (!result) { status.textContent = 'Failed to open terminal'; return; }
+  document.getElementById('mgr-pty-open-btn').style.display  = 'none';
+  document.getElementById('mgr-pty-close-btn').style.display = '';
+
+  const containerEl = document.getElementById('mgr-pty-container');
+  const result = await openPtyTerminal(row.container_name, user, containerEl);
+  if (!result) { status.textContent = 'Failed to open terminal'; document.getElementById('mgr-pty-open-btn').style.display = ''; document.getElementById('mgr-pty-close-btn').style.display = 'none'; return; }
 
   const { term, fitAddon, ws } = result;
   mgrPtyTerm = term; mgrPtyWs = ws;
   status.textContent = '';
-
-  document.getElementById('mgr-pty-open-btn').style.display  = 'none';
-  document.getElementById('mgr-pty-close-btn').style.display = '';
-
-  mgrPtyRo = wireTerminal(term, fitAddon, ws, document.getElementById('mgr-pty-container'));
 }
 
 function mgrCloseTerminal() {

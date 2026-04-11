@@ -11,9 +11,9 @@ setInterval(() => {
   for (const [t, e] of tokenStore) if (e.expires < now) tokenStore.delete(t);
 }, 60_000);
 
-function createTerminalToken(container, user) {
+function createTerminalToken(container, user, cols, rows) {
   const token = crypto.randomBytes(16).toString('hex');
-  tokenStore.set(token, { container, user, expires: Date.now() + 30_000 });
+  tokenStore.set(token, { container, user, cols: cols || 220, rows: rows || 50, expires: Date.now() + 30_000 });
   return token;
 }
 
@@ -35,9 +35,24 @@ function createWss() {
 
       execStream = await execInstance.start({ hijack: true, stdin: true });
 
+      // Set initial terminal size immediately so TUI apps (opencode etc.) start
+      // with correct dimensions instead of the default 80×24.
+      execInstance.resize({ h: entry.rows, w: entry.cols }).catch(() => {});
+
       // Docker TTY → browser (binary frames)
+      // Coalesce chunks that arrive in the same I/O tick so that escape
+      // sequences (e.g. \x1bN, \x1bV) are never split across WS frames.
+      let pending = null;
       execStream.on('data', chunk => {
-        if (ws.readyState === 1) ws.send(chunk, { binary: true });
+        if (pending === null) {
+          pending = chunk;
+          setImmediate(() => {
+            if (ws.readyState === 1) ws.send(pending, { binary: true });
+            pending = null;
+          });
+        } else {
+          pending = Buffer.concat([pending, chunk]);
+        }
       });
       execStream.on('end', () => {
         if (ws.readyState === 1) ws.close(1000, 'Process exited');
