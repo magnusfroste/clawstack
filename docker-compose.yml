@@ -59,6 +59,7 @@ services:
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
       - CLAUDE_DEFAULT_MODEL=${CLAUDE_DEFAULT_MODEL:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
     volumes:
       - paperclip_data:/paperclip
     depends_on:

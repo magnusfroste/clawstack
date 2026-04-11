@@ -20,7 +20,7 @@ function createTerminalToken(container, user, cols, rows) {
 function createWss() {
   const wss = new WebSocketServer({ noServer: true });
 
-  wss.on('connection', async (ws, { container, user }) => {
+  wss.on('connection', async (ws, { container, user, cols, rows }) => {
     let execStream;
     let execInstance;
 
@@ -30,14 +30,14 @@ function createWss() {
         Cmd: ['/bin/bash'],
         AttachStdin: true, AttachStdout: true, AttachStderr: true,
         Tty: true, User: user,
-        Env: ['TERM=xterm-256color', ...(user === 'node' ? ['HOME=/home/node'] : [])],
+        Env: ['TERM=xterm-256color', 'COLORTERM=truecolor'],
       });
 
       execStream = await execInstance.start({ hijack: true, stdin: true });
 
       // Set initial terminal size immediately so TUI apps (opencode etc.) start
       // with correct dimensions instead of the default 80×24.
-      execInstance.resize({ h: entry.rows, w: entry.cols }).catch(() => {});
+      execInstance.resize({ h: rows, w: cols }).catch(() => {});
 
       // Docker TTY → browser (binary frames)
       // Coalesce chunks that arrive in the same I/O tick so that escape
