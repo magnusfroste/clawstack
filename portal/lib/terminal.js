@@ -78,7 +78,7 @@ function createWss() {
 
     } catch (e) {
       console.error('[terminal] error:', e.message);
-      if (ws.readyState === 1) ws.close(1011, e.message);
+      if (ws.readyState === 1) ws.close(1011, e.message.slice(0, 123));
     }
   });
 

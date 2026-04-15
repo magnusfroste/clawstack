@@ -96,6 +96,7 @@ async function loadInstances() {
       <div class="inst-actions">
         <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','files','${esc(img)}')">Files</button>
         <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','logs','${esc(img)}')">Logs</button>
+        <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','chat','${esc(img)}')">Chat</button>
         <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','cli','${esc(img)}')">CLI</button>
         <button class="btn ghost sm" onclick="openMgr('${esc(i.name)}','version','${esc(img)}')">Version</button>
         <div class="divider"></div>
@@ -183,10 +184,21 @@ function onDomainInput(inp) {
 }
 
 // ── Manager modal ──
-let mgrName = null, mgrPath = null, mgrTab = 'files', mgrImage = null;
+let mgrName = null, mgrPath = null, mgrTab = 'files', mgrImage = null, mgrDomain = null;
 
 function openMgr(name, tab = 'files', image = '', pushUrl = true) {
   mgrName = name; mgrPath = null; mgrImage = image;
+  const inst = (__cachedInstances || []).find(i => i.name === name);
+  mgrDomain = inst ? inst.domain : null;
+  const domLink = document.getElementById('mgr-domain-link');
+  if (mgrDomain) {
+    domLink.href = 'https://' + mgrDomain;
+    document.getElementById('mgr-domain-text').textContent = mgrDomain;
+    domLink.style.display = '';
+  } else { domLink.style.display = 'none'; }
+  if (!chatHistory[name]) {
+    try { const s = localStorage.getItem('chat_' + name); if (s) chatHistory[name] = JSON.parse(s); } catch {}
+  }
   document.getElementById('mgr-title').textContent = name;
   document.getElementById('mgr-editor').value = '';
   document.getElementById('btn-save').disabled = true;
@@ -224,6 +236,7 @@ async function refreshMgrBadge() {
 }
 
 function switchTab(tab) {
+  clearInterval(logsTimer); logsTimer = null;
   mgrTab = tab;
   ['files','logs','cli','exec','terminal','version','model','chat'].forEach(t =>
     document.getElementById('tab-' + t).className = 'tab' + (tab === t ? ' active' : '')
@@ -249,6 +262,7 @@ function switchTab(tab) {
   } else if (tab === 'logs') {
     document.getElementById('mgr-crumb').textContent = 'Container logs (last 300 lines)';
     loadLogs();
+    logsTimer = setInterval(loadLogs, 5000);
   } else if (tab === 'cli') {
     document.getElementById('mgr-crumb').textContent = 'OpenClaw CLI (node user)';
     setTimeout(() => document.getElementById('cli-cmd').focus(), 50);
@@ -266,6 +280,12 @@ function switchTab(tab) {
     loadModel();
   } else if (tab === 'chat') {
     document.getElementById('mgr-crumb').textContent = 'Chat';
+    const msgs = document.getElementById('chat-messages');
+    if (!msgs.children.length && chatHistory[mgrName]?.length) {
+      chatHistory[mgrName].forEach(m => chatAddBubble(m.role, m.content));
+      msgs.scrollTop = msgs.scrollHeight;
+    }
+    setTimeout(() => document.getElementById('chat-input').focus(), 50);
   } else if (tab === 'terminal') {
     document.getElementById('mgr-crumb').textContent = 'Interactive PTY terminal';
   } else {
@@ -277,6 +297,33 @@ function switchTab(tab) {
 const chatHistory = {};
 let chatStreaming  = false;
 
+function renderMarkdown(text) {
+  const blocks = [];
+  text = text.replace(/```(?:\w*\n)?([\s\S]*?)```/g, (_, code) => {
+    blocks.push(`<pre><code>${esc(code)}</code></pre>`);
+    return '\x00BLOCK' + (blocks.length - 1) + '\x00';
+  });
+  text = esc(text);
+  text = text.replace(/`([^`\n]+)`/g, (_, c) => `<code>${c}</code>`);
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/\n/g, '<br>');
+  text = text.replace(/\x00BLOCK(\d+)\x00/g, (_, i) => blocks[i]);
+  return text;
+}
+
+function saveChatHistory(name) {
+  try {
+    const msgs = (chatHistory[name] || []).slice(-60);
+    localStorage.setItem('chat_' + name, JSON.stringify(msgs));
+  } catch {}
+}
+
+function clearChat() {
+  chatHistory[mgrName] = [];
+  try { localStorage.removeItem('chat_' + mgrName); } catch {}
+  document.getElementById('chat-messages').innerHTML = '';
+}
+
 function chatAddBubble(role, text, streaming = false) {
   const msgs  = document.getElementById('chat-messages');
   const wrap  = document.createElement('div');
@@ -286,7 +333,8 @@ function chatAddBubble(role, text, streaming = false) {
   label.textContent = role === 'user' ? 'You' : mgrName;
   const bubble = document.createElement('div');
   bubble.className = 'chat-bubble ' + role + (streaming ? ' streaming' : '');
-  bubble.textContent = text;
+  if (role === 'assistant' && !streaming && text) bubble.innerHTML = renderMarkdown(text);
+  else bubble.textContent = text;
   wrap.appendChild(label);
   wrap.appendChild(bubble);
   msgs.appendChild(wrap);
@@ -302,6 +350,7 @@ async function sendChat() {
   input.value = '';
   if (!chatHistory[mgrName]) chatHistory[mgrName] = [];
   chatHistory[mgrName].push({ role: 'user', content: text });
+  saveChatHistory(mgrName);
   chatAddBubble('user', text);
   const bubble = chatAddBubble('assistant', '', true);
   chatStreaming = true;
@@ -345,9 +394,13 @@ async function sendChat() {
     bubble.textContent = accumulated;
   }
   bubble.classList.remove('streaming');
+  if (accumulated) bubble.innerHTML = renderMarkdown(accumulated);
   chatStreaming = false;
   document.getElementById('chat-send').disabled = false;
-  if (accumulated) chatHistory[mgrName].push({ role: 'assistant', content: accumulated });
+  if (accumulated) {
+    chatHistory[mgrName].push({ role: 'assistant', content: accumulated });
+    saveChatHistory(mgrName);
+  }
   input.focus();
 }
 
@@ -506,10 +559,10 @@ async function copyLogs() {
 
 async function loadLogs() {
   const el = document.getElementById('mgr-logs');
-  el.textContent = 'Loading…';
+  const atBottom = !el.textContent || el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   const d = await api('GET', '/api/instances/' + mgrName + '/logs');
   el.textContent = d.error ? ('Error: ' + d.error) : (d.logs || '(no logs)');
-  el.scrollTop   = el.scrollHeight;
+  if (atBottom) el.scrollTop = el.scrollHeight;
 }
 
 // ── CLI tab ──
@@ -581,6 +634,7 @@ async function mgrAction(action) {
 async function recreateInstance() {
   const tag = document.getElementById('version-input').value.trim();
   if (!tag) { document.getElementById('version-status').textContent = 'Enter a version tag first'; return; }
+  if (!confirm(`Recreate ${mgrName} with image tag "${tag}"? The container will be stopped and replaced.`)) return;
   const base  = document.getElementById('version-base').textContent;
   const image = (tag.includes('/') || !base) ? tag : base + tag;
   const btn   = document.getElementById('version-btn');
@@ -602,7 +656,7 @@ async function recreateInstance() {
 }
 
 // ── Page navigation ──
-let sysTimer = null, ppTimer = null;
+let sysTimer = null, ppTimer = null, logsTimer = null;
 
 function showPage(name, pushUrl = true) {
   ['instances', 'system', 'paperclip'].forEach(p => {

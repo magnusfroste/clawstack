@@ -9,6 +9,7 @@ const db        = require('./lib/db');
 const { getProxy, proxyWs } = require('./lib/docker');
 const { requireAdmin } = require('./lib/auth');
 const { createWss, tokenStore } = require('./lib/terminal');
+const deviceWatcher = require('./lib/device-watcher');
 
 const app = express();
 
@@ -84,4 +85,7 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`ClawStack portal listening on :${PORT}`));
+server.listen(PORT, () => {
+  console.log(`ClawStack portal listening on :${PORT}`);
+  deviceWatcher.start();
+});

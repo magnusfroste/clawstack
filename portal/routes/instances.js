@@ -18,6 +18,14 @@ function resolveInstancePath(instanceName, relPath) {
   return full;
 }
 
+// If the user typed just a tag like "latest" or "2026.4.12", prepend the base image.
+function resolveImage(input) {
+  const img = (input || OPENCLAW_IMAGE).trim();
+  if (img.includes('/')) return img;
+  const base = OPENCLAW_IMAGE.includes(':') ? OPENCLAW_IMAGE.slice(0, OPENCLAW_IMAGE.lastIndexOf(':') + 1) : OPENCLAW_IMAGE + ':';
+  return base + img;
+}
+
 function register(app) {
   // ── List instances ──
   app.get('/api/instances', requireAdmin, (req, res) => {
@@ -42,7 +50,7 @@ function register(app) {
 
     const containerName  = `clawstack-${name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
     const token          = crypto.randomBytes(32).toString('hex');
-    const instanceImage  = (image || OPENCLAW_IMAGE).trim();
+    const instanceImage  = resolveImage(image);
 
     try {
       db.prepare('INSERT INTO instances (name, domain, container_name, token, provider, model, role, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -56,6 +64,18 @@ function register(app) {
     } catch (e) {
       db.prepare('DELETE FROM instances WHERE name = ?').run(name);
       return res.status(500).json({ error: `Bootstrap failed: ${e.message}` });
+    }
+
+    try {
+      await new Promise((resolve, reject) => {
+        docker.pull(instanceImage, (err, stream) => {
+          if (err) return reject(err);
+          docker.modem.followProgress(stream, err => err ? reject(err) : resolve());
+        });
+      });
+    } catch (e) {
+      db.prepare('DELETE FROM instances WHERE name = ?').run(name);
+      return res.status(500).json({ error: `Pull failed: ${e.message}` });
     }
 
     try {
@@ -102,7 +122,7 @@ function register(app) {
   app.post('/api/instances/:name/recreate', requireAdmin, async (req, res) => {
     const row = db.prepare('SELECT * FROM instances WHERE name = ?').get(req.params.name);
     if (!row) return res.status(404).json({ error: 'not found' });
-    const newImage = (req.body.image || row.image || OPENCLAW_IMAGE).trim();
+    const newImage = resolveImage(req.body.image || row.image);
     let apiKey = '';
     try {
       const info = await docker.getContainer(row.container_name).inspect();
@@ -326,17 +346,18 @@ function register(app) {
       const cfg        = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
       const providerConf = { ...(PROVIDER_CONFIGS[provider] || { baseUrl: baseUrl || '', api: 'openai-completions' }) };
       if (baseUrl) providerConf.baseUrl = baseUrl;
+      const modelId = model.startsWith(`${provider}/`) ? model.slice(provider.length + 1) : model;
       cfg.models = cfg.models || {};
       cfg.models.providers = {
         [provider]: {
           ...providerConf,
           apiKey: apiKey || cfg.models?.providers?.[provider]?.apiKey || '${OPENCLAW_PROVIDER_API_KEY}',
-          models: [{ id: model, name: model }],
+          models: [{ id: modelId, name: modelId }],
         }
       };
       cfg.agents = cfg.agents || {};
       cfg.agents.defaults = cfg.agents.defaults || {};
-      cfg.agents.defaults.model = { primary: `${provider}/${model}` };
+      cfg.agents.defaults.model = { primary: `${provider}/${modelId}` };
       fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf8');
       fs.chownSync(cfgPath, 1000, 1000);
       const container = docker.getContainer(row.container_name);

@@ -3,7 +3,7 @@
 const ADMIN_USER  = process.env.ADMIN_USER  || 'admin';
 const ADMIN_PASS  = process.env.ADMIN_PASS  || 'changeme';
 const BASE_DOMAIN = process.env.BASE_DOMAIN || '';
-const OPENCLAW_IMAGE    = process.env.OPENCLAW_IMAGE || 'ghcr.io/openclaw/openclaw:2026.3.24';
+const OPENCLAW_IMAGE    = process.env.OPENCLAW_IMAGE || 'ghcr.io/openclaw/openclaw:latest';
 const INSTANCES_DIR     = '/instances';
 const INSTANCES_HOST_DIR = process.env.INSTANCES_HOST_DIR || '/opt/clawstack/instances';
 const CONFIG_DIR        = '/clawstack-config';

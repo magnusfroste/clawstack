@@ -395,7 +395,7 @@ function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseU
       mode: 'local', bind: 'lan',
       remote: { url: `https://${domain}` },
       auth: { token },
-      trustedProxies: '172.16.0.0/12',
+      trustedProxies: ['172.16.0.0/12'],
       http: { endpoints: { responses: { enabled: true } } },
       controlUi: {
         allowedOrigins: ['http://localhost:18789', `https://${domain}`],

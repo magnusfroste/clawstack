@@ -359,6 +359,7 @@
     <button class="back" onclick="closeMgr()">← Back</button>
     <span class="inst-label" id="mgr-title"></span>
     <span id="mgr-badge" class="badge" style="margin-left:2px"></span>
+    <a id="mgr-domain-link" href="#" target="_blank" style="font-size:0.75rem;color:var(--text3);text-decoration:none;margin-left:12px;display:none;opacity:.8" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.8">↗ <span id="mgr-domain-text"></span></a>
     <div class="spacer"></div>
     <div class="bar-actions">
       <button class="btn amber sm" onclick="mgrAction('restart')">Restart</button>
@@ -459,6 +460,7 @@
             style="flex:1;resize:none;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;color:var(--text);font-size:0.85rem;font-family:inherit;line-height:1.4"
             onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
           <button class="btn primary sm" onclick="sendChat()" id="chat-send" style="align-self:flex-end">Send</button>
+          <button class="btn ghost sm" onclick="clearChat()" style="align-self:flex-end;opacity:.6" title="Clear history">Clear</button>
         </div>
       </div>
 
