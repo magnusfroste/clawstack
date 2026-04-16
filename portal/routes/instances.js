@@ -10,8 +10,26 @@ const { docker, containerExec } = require('../lib/docker');
 const { bootstrapInstance } = require('../lib/bootstrap');
 const { requireAdmin, checkAuth } = require('../lib/auth');
 
-function resolveInstancePath(instanceName, relPath) {
-  const base = path.join(INSTANCES_DIR, instanceName);
+// Resolve the host-side instance dir to the path accessible inside the portal container.
+// New instances: host INSTANCES_HOST_DIR/<name> → portal INSTANCES_DIR/<name>
+// Old instances: host /opt/clawstack/instances/<name> → same path (mounted in portal)
+async function getInstanceDir(containerName, instanceName) {
+  try {
+    const info = await docker.getContainer(containerName).inspect();
+    const bind = (info.HostConfig.Binds || []).find(b => b.endsWith(':/home/node/.openclaw'));
+    if (bind) {
+      const configHostDir = bind.split(':')[0]; // e.g. /opt/clawstack/instances/clawthree/config
+      const instanceHostDir = path.dirname(configHostDir);
+      if (instanceHostDir.startsWith(INSTANCES_HOST_DIR + path.sep) || instanceHostDir === INSTANCES_HOST_DIR) {
+        return path.join(INSTANCES_DIR, instanceHostDir.slice(INSTANCES_HOST_DIR.length + 1));
+      }
+      return instanceHostDir; // Legacy: host path is mounted at same path in portal
+    }
+  } catch {}
+  return path.join(INSTANCES_DIR, instanceName);
+}
+
+function resolveInstancePath(base, relPath) {
   const full = path.resolve(base, relPath || '');
   if (full !== base && !full.startsWith(base + path.sep))
     throw new Error('Path traversal not allowed');
@@ -28,14 +46,15 @@ function resolveImage(input) {
 
 function register(app) {
   // ── List instances ──
-  app.get('/api/instances', requireAdmin, (req, res) => {
+  app.get('/api/instances', requireAdmin, async (req, res) => {
     const rows = db.prepare('SELECT id, name, domain, container_name, token, provider, model, status, image, created_at FROM instances ORDER BY created_at DESC').all();
-    rows.forEach(row => {
+    await Promise.all(rows.map(async row => {
       try {
-        const cfg = JSON.parse(fs.readFileSync(path.join(INSTANCES_DIR, row.name, 'config', 'openclaw.json'), 'utf8'));
+        const instanceDir = await getInstanceDir(row.container_name, row.name);
+        const cfg = JSON.parse(fs.readFileSync(path.join(instanceDir, 'config', 'openclaw.json'), 'utf8'));
         row.liveModel = cfg?.agents?.defaults?.model?.primary || cfg?.agents?.list?.[0]?.model || null;
       } catch { row.liveModel = null; }
-    });
+    }));
     res.json(rows);
   });
 
@@ -182,15 +201,16 @@ function register(app) {
 
   app.options('/api/instances/:name/files', fileCors, (req, res) => res.sendStatus(204));
 
-  app.get('/api/instances/:name/files', fileCors, (req, res) => {
-    const row = db.prepare('SELECT id, token FROM instances WHERE name = ?').get(req.params.name);
+  app.get('/api/instances/:name/files', fileCors, async (req, res) => {
+    const row = db.prepare('SELECT id, token, container_name FROM instances WHERE name = ?').get(req.params.name);
     if (!row) return res.status(404).json({ error: 'not found' });
     if (!checkAuth(req, row.token)) {
       res.set('WWW-Authenticate', 'Basic realm="ClawStack"');
       return res.status(401).json({ error: 'Unauthorized' });
     }
     try {
-      const full = resolveInstancePath(req.params.name, req.query.path || '');
+      const instanceDir = await getInstanceDir(row.container_name, req.params.name);
+      const full = resolveInstancePath(instanceDir, req.query.path || '');
       const stat = fs.statSync(full);
       if (stat.isDirectory()) {
         const entries = fs.readdirSync(full, { withFileTypes: true })
@@ -206,8 +226,8 @@ function register(app) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  app.post('/api/instances/:name/files', fileCors, (req, res) => {
-    const row = db.prepare('SELECT id, token FROM instances WHERE name = ?').get(req.params.name);
+  app.post('/api/instances/:name/files', fileCors, async (req, res) => {
+    const row = db.prepare('SELECT id, token, container_name FROM instances WHERE name = ?').get(req.params.name);
     if (!row) return res.status(404).json({ error: 'not found' });
     if (!checkAuth(req, row.token)) {
       res.set('WWW-Authenticate', 'Basic realm="ClawStack"');
@@ -216,7 +236,8 @@ function register(app) {
     const { path: filePath, content } = req.body;
     if (typeof content !== 'string') return res.status(400).json({ error: 'content required' });
     try {
-      const full = resolveInstancePath(req.params.name, filePath);
+      const instanceDir = await getInstanceDir(row.container_name, req.params.name);
+      const full = resolveInstancePath(instanceDir, filePath);
       if (fs.statSync(full).isDirectory()) return res.status(400).json({ error: 'is a directory' });
       fs.writeFileSync(full, content, 'utf8');
       fs.chownSync(full, 1000, 1000);
@@ -225,10 +246,10 @@ function register(app) {
   });
 
   // ── Backup / Restore ──
-  app.get('/api/instances/:name/backup', requireAdmin, (req, res) => {
-    if (!db.prepare('SELECT id FROM instances WHERE name = ?').get(req.params.name))
-      return res.status(404).json({ error: 'not found' });
-    const dir = path.join(INSTANCES_DIR, req.params.name);
+  app.get('/api/instances/:name/backup', requireAdmin, async (req, res) => {
+    const row = db.prepare('SELECT container_name FROM instances WHERE name = ?').get(req.params.name);
+    if (!row) return res.status(404).json({ error: 'not found' });
+    const dir = await getInstanceDir(row.container_name, req.params.name);
     if (!fs.existsSync(dir)) return res.status(404).json({ error: 'instance directory not found' });
     res.setHeader('Content-Type', 'application/gzip');
     res.setHeader('Content-Disposition', `attachment; filename="${req.params.name}-backup.tar.gz"`);
@@ -242,7 +263,7 @@ function register(app) {
     const row = db.prepare('SELECT container_name FROM instances WHERE name = ?').get(req.params.name);
     if (!row) return res.status(404).json({ error: 'not found' });
     if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'no file uploaded' });
-    const dir     = path.join(INSTANCES_DIR, req.params.name);
+    const dir     = await getInstanceDir(row.container_name, req.params.name);
     const tmpFile = path.join('/tmp', `${req.params.name}-restore.tar.gz`);
     try {
       fs.writeFileSync(tmpFile, req.body);
@@ -337,11 +358,12 @@ function register(app) {
   });
 
   // ── Model config ──
-  app.get('/api/instances/:name/model', requireAdmin, (req, res) => {
-    const row = db.prepare('SELECT name FROM instances WHERE name = ?').get(req.params.name);
+  app.get('/api/instances/:name/model', requireAdmin, async (req, res) => {
+    const row = db.prepare('SELECT name, container_name FROM instances WHERE name = ?').get(req.params.name);
     if (!row) return res.status(404).json({ error: 'not found' });
     try {
-      const cfg        = JSON.parse(fs.readFileSync(path.join(INSTANCES_DIR, req.params.name, 'config', 'openclaw.json'), 'utf8'));
+      const instanceDir = await getInstanceDir(row.container_name, row.name);
+      const cfg        = JSON.parse(fs.readFileSync(path.join(instanceDir, 'config', 'openclaw.json'), 'utf8'));
       const primary    = cfg?.agents?.defaults?.model?.primary || '';
       const providers  = cfg?.models?.providers || {};
       const providerKey = Object.keys(providers)[0] || '';
@@ -361,8 +383,36 @@ function register(app) {
     const { provider, model, apiKey, baseUrl } = req.body;
     if (!provider || !model) return res.status(400).json({ error: 'provider and model required' });
     try {
-      const cfgPath    = path.join(INSTANCES_DIR, req.params.name, 'config', 'openclaw.json');
-      const cfg        = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      const instanceDir = await getInstanceDir(row.container_name, row.name);
+      const cfgPath     = path.join(instanceDir, 'config', 'openclaw.json');
+      const cfg         = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+
+      // Determine effective API key:
+      // 1. Use submitted key if provided
+      // 2. Keep existing key from current config (same or different provider)
+      // 3. Try the container env var as fallback
+      // 4. Fall back to placeholder (reads from env at runtime)
+      const existingKey = Object.values(cfg.models?.providers || {})[0]?.apiKey;
+      let effectiveKey = apiKey || existingKey;
+      if (!effectiveKey || effectiveKey.startsWith('${')) {
+        // Try to read actual key from container env
+        try {
+          const info = await docker.getContainer(row.container_name).inspect();
+          const envEntry = (info.Config.Env || []).find(e => e.startsWith('OPENCLAW_PROVIDER_API_KEY='));
+          if (envEntry) {
+            const envKey = envEntry.slice('OPENCLAW_PROVIDER_API_KEY='.length);
+            if (envKey && envKey !== 'none') effectiveKey = envKey;
+          }
+        } catch {}
+      }
+      if (!effectiveKey) effectiveKey = '${OPENCLAW_PROVIDER_API_KEY}';
+
+      // Require explicit key when switching to a keyed provider and we have nothing useful
+      const oldProvider = Object.keys(cfg.models?.providers || {})[0] || '';
+      if (!apiKey && provider !== oldProvider && !NO_KEY_PROVIDERS.has(provider) && effectiveKey === '${OPENCLAW_PROVIDER_API_KEY}') {
+        return res.status(400).json({ error: 'API key required when changing provider' });
+      }
+
       const providerConf = { ...(PROVIDER_CONFIGS[provider] || { baseUrl: baseUrl || '', api: 'openai-completions' }) };
       if (provider === 'private' && baseUrl) providerConf.baseUrl = baseUrl;
       const modelId = model.startsWith(`${provider}/`) ? model.slice(provider.length + 1) : model;
@@ -370,7 +420,7 @@ function register(app) {
       cfg.models.providers = {
         [provider]: {
           ...providerConf,
-          apiKey: apiKey || cfg.models?.providers?.[provider]?.apiKey || '${OPENCLAW_PROVIDER_API_KEY}',
+          apiKey: effectiveKey,
           models: [{ id: modelId, name: modelId }],
         }
       };
