@@ -58,25 +58,43 @@ async function init() {
 }
 
 let __cachedInstances = [];
+let newFormOpen = true, newFormInitialized = false;
 
-async function loadInstances() {
+function relativeTime(dateStr) {
+  if (!dateStr) return '';
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const d = Math.floor(diff / 86400000), h = Math.floor(diff / 3600000), m = Math.floor(diff / 60000);
+  return d > 0 ? d + 'd ago' : h > 0 ? h + 'h ago' : m > 0 ? m + 'm ago' : 'just now';
+}
+
+function toggleNewForm() {
+  newFormOpen = !newFormOpen;
+  document.getElementById('new-inst-card').style.display = newFormOpen ? '' : 'none';
+  document.getElementById('new-inst-toggle').textContent = newFormOpen ? '▾ Collapse' : '+ New';
+}
+
+function filterInstances() {
+  const q = (document.getElementById('inst-search').value || '').toLowerCase().trim();
+  renderInstanceCards(q ? __cachedInstances.filter(i =>
+    i.name.toLowerCase().includes(q) ||
+    i.domain.toLowerCase().includes(q) ||
+    (i.liveModel || '').toLowerCase().includes(q) ||
+    (i.provider || '').toLowerCase().includes(q)
+  ) : __cachedInstances);
+}
+
+function renderInstanceCards(instances) {
   const list = document.getElementById('instances-list');
-  const countEl = document.getElementById('instances-count');
-  const d = await api('GET', '/api/instances');
-  if (d.error || !Array.isArray(d)) {
-    list.innerHTML = `<div class="empty">Error loading instances: ${esc(String(d.error || 'unknown'))}</div>`;
+  const q = document.getElementById('inst-search').value.trim();
+  if (!instances.length) {
+    list.innerHTML = `<div class="empty">${q ? 'No instances match "' + esc(q) + '"' : 'No instances yet. Create one above.'}</div>`;
     return;
   }
-  __cachedInstances = d;
   const defaultImage = __initData.defaultImage || '';
-  countEl.textContent = `${d.length} total`;
-  if (d.length === 0) {
-    list.innerHTML = '<div class="empty">No instances yet. Create one above.</div>';
-    return;
-  }
-  list.innerHTML = `<div class="instances">${d.map(i => {
+  list.innerHTML = `<div class="instances">${instances.map(i => {
     const img = i.image || defaultImage;
     const imgTag = img.split(':')[1] || img;
+    const age = relativeTime(i.created_at);
     return `<div class="inst-card">
       <div class="inst-main">
         <div class="inst-name">
@@ -85,7 +103,7 @@ async function loadInstances() {
           ${i.role && i.role !== 'generalist' ? `<span class="badge role">${esc(i.role)}</span>` : ''}
         </div>
         ${i.liveModel ? `<div class="inst-meta">${esc(i.liveModel)}</div>` : ''}
-        <div class="inst-meta" title="${esc(img)}">${esc(imgTag)}</div>
+        <div class="inst-meta" title="${esc(img)}">${esc(imgTag)}${age ? ` · ${age}` : ''}</div>
       </div>
       <a class="inst-domain" href="https://${esc(i.domain)}" target="_blank">${esc(i.domain)}</a>
       <div class="inst-token">
@@ -108,6 +126,26 @@ async function loadInstances() {
       </div>
     </div>`;
   }).join('')}</div>`;
+}
+
+async function loadInstances() {
+  const countEl = document.getElementById('instances-count');
+  const d = await api('GET', '/api/instances');
+  if (d.error || !Array.isArray(d)) {
+    document.getElementById('instances-list').innerHTML = `<div class="empty">Error loading instances: ${esc(String(d.error || 'unknown'))}</div>`;
+    return;
+  }
+  __cachedInstances = d;
+  countEl.textContent = `${d.length} total`;
+  if (!newFormInitialized) {
+    newFormInitialized = true;
+    if (d.length > 0) {
+      newFormOpen = false;
+      document.getElementById('new-inst-card').style.display = 'none';
+      document.getElementById('new-inst-toggle').textContent = '+ New';
+    }
+  }
+  filterInstances();
 }
 
 // ── Core API helper ──
@@ -184,7 +222,7 @@ function onDomainInput(inp) {
 }
 
 // ── Manager modal ──
-let mgrName = null, mgrPath = null, mgrTab = 'files', mgrImage = null, mgrDomain = null;
+let mgrName = null, mgrPath = null, mgrTab = 'files', mgrImage = null, mgrDomain = null, mgrDirty = false;
 
 function openMgr(name, tab = 'files', image = '', pushUrl = true) {
   mgrName = name; mgrPath = null; mgrImage = image;
@@ -199,12 +237,14 @@ function openMgr(name, tab = 'files', image = '', pushUrl = true) {
   if (!chatHistory[name]) {
     try { const s = localStorage.getItem('chat_' + name); if (s) chatHistory[name] = JSON.parse(s); } catch {}
   }
+  mgrDirty = false;
   document.getElementById('mgr-title').textContent = name;
   document.getElementById('mgr-editor').value = '';
   document.getElementById('btn-save').disabled = true;
   document.getElementById('mgr-status').textContent = '';
   document.getElementById('mgr-tree').innerHTML = '';
   document.getElementById('chat-messages').innerHTML = '';
+  document.getElementById('logs-filter').value = '';
   document.getElementById('mgr').classList.add('open');
   if (pushUrl && location.pathname !== '/instances/' + name) {
     history.pushState({ instance: name, tab }, '', '/instances/' + name);
@@ -213,6 +253,9 @@ function openMgr(name, tab = 'files', image = '', pushUrl = true) {
   switchTab(tab);
 }
 function closeMgr(pushUrl = true) {
+  if (mgrDirty && !confirm('You have unsaved changes. Close anyway?')) return;
+  mgrDirty = false;
+  clearInterval(logsTimer); logsTimer = null;
   mgrCloseTerminal();
   document.getElementById('mgr').classList.remove('open');
   mgrName = null;
@@ -236,7 +279,12 @@ async function refreshMgrBadge() {
 }
 
 function switchTab(tab) {
+  if (mgrTab === 'files' && mgrDirty && tab !== 'files') {
+    if (!confirm('You have unsaved changes. Switch tab anyway?')) return;
+    mgrDirty = false;
+  }
   clearInterval(logsTimer); logsTimer = null;
+  document.getElementById('logs-filter-bar').style.display = 'none';
   mgrTab = tab;
   ['files','logs','cli','exec','terminal','version','model','chat'].forEach(t =>
     document.getElementById('tab-' + t).className = 'tab' + (tab === t ? ' active' : '')
@@ -261,6 +309,7 @@ function switchTab(tab) {
     document.getElementById('mgr-crumb').textContent = mgrPath || 'Select a file';
   } else if (tab === 'logs') {
     document.getElementById('mgr-crumb').textContent = 'Container logs (last 300 lines)';
+    document.getElementById('logs-filter-bar').style.display = '';
     loadLogs();
     logsTimer = setInterval(loadLogs, 5000);
   } else if (tab === 'cli') {
@@ -280,6 +329,9 @@ function switchTab(tab) {
     loadModel();
   } else if (tab === 'chat') {
     document.getElementById('mgr-crumb').textContent = 'Chat';
+    api('GET', '/api/instances/' + mgrName + '/model').then(d => {
+      if (!d.error && d.model) document.getElementById('mgr-crumb').textContent = `Chat — ${d.provider}/${d.model}`;
+    });
     const msgs = document.getElementById('chat-messages');
     if (!msgs.children.length && chatHistory[mgrName]?.length) {
       chatHistory[mgrName].forEach(m => chatAddBubble(m.role, m.content));
@@ -407,6 +459,7 @@ async function sendChat() {
 function onModelProviderChange() {
   const p = document.getElementById('model-provider').value;
   document.getElementById('model-baseurl-row').style.display = p === 'private' ? '' : 'none';
+  if (p !== 'private') document.getElementById('model-baseurl').value = '';
 }
 
 async function loadModel() {
@@ -431,8 +484,9 @@ async function saveModel() {
   if (!model) { st.textContent = 'Model is required'; return; }
   st.textContent = 'Saving & restarting…';
   const d = await api('POST', '/api/instances/' + mgrName + '/model', { provider, model, apiKey, baseUrl });
-  if (d.error) { st.style.color = 'var(--red)'; st.textContent = 'Error: ' + d.error; return; }
+  if (d.error) { st.style.color = 'var(--red)'; st.textContent = 'Error: ' + d.error; toast('Model update failed: ' + d.error, 'error'); return; }
   st.style.color = 'var(--green)'; st.textContent = 'Saved ✓ — restarting…';
+  toast('Model updated — restarting container', 'success');
   setTimeout(async () => { await refreshMgrBadge(); st.textContent = ''; st.style.color = ''; }, 3000);
 }
 
@@ -498,6 +552,7 @@ async function loadFile(path) {
   document.getElementById('mgr-editor').value       = d.content;
   document.getElementById('mgr-status').textContent = '';
   document.getElementById('btn-save').disabled       = false;
+  mgrDirty = false;
 }
 
 async function saveFile() {
@@ -510,8 +565,14 @@ async function saveFile() {
   document.getElementById('btn-save').disabled = true;
   const d = await api('POST', '/api/instances/' + mgrName + '/files', { path: mgrPath, content });
   document.getElementById('btn-save').disabled = false;
-  document.getElementById('mgr-status').textContent = d.success ? 'Saved ✓' : ('Error: ' + d.error);
-  if (d.success) setTimeout(() => document.getElementById('mgr-status').textContent = '', 2500);
+  if (d.success) {
+    mgrDirty = false;
+    document.getElementById('mgr-status').textContent = '';
+    toast('Saved ' + mgrPath, 'success');
+  } else {
+    document.getElementById('mgr-status').textContent = 'Error: ' + d.error;
+    toast('Save failed: ' + d.error, 'error');
+  }
 }
 
 function downloadBackup() {
@@ -561,8 +622,18 @@ async function loadLogs() {
   const el = document.getElementById('mgr-logs');
   const atBottom = !el.textContent || el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   const d = await api('GET', '/api/instances/' + mgrName + '/logs');
-  el.textContent = d.error ? ('Error: ' + d.error) : (d.logs || '(no logs)');
+  const raw = d.error ? ('Error: ' + d.error) : (d.logs || '(no logs)');
+  el.dataset.raw = raw;
+  filterLogs();
   if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
+function filterLogs() {
+  const el = document.getElementById('mgr-logs');
+  const raw = el.dataset.raw || '';
+  const q = (document.getElementById('logs-filter').value || '').toLowerCase();
+  if (!q) { el.textContent = raw; return; }
+  el.textContent = raw.split('\n').filter(l => l.toLowerCase().includes(q)).join('\n');
 }
 
 // ── CLI tab ──
@@ -1185,6 +1256,32 @@ document.getElementById('mgr-editor').addEventListener('keydown', e => {
   t.value = t.value.slice(0, s) + '  ' + t.value.slice(end);
   t.selectionStart = t.selectionEnd = s + 2;
 });
+
+document.getElementById('mgr-editor').addEventListener('input', () => { if (mgrPath) mgrDirty = true; });
+
+// ── Keyboard shortcuts ──
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+    if (document.getElementById('mgr').classList.contains('open') && mgrTab === 'files' && mgrPath) {
+      e.preventDefault(); saveFile();
+    }
+    return;
+  }
+  if (e.key === 'Escape' && document.getElementById('mgr').classList.contains('open') && !e.target.closest('input, textarea, select')) {
+    closeMgr();
+  }
+});
+
+// ── Toast ──
+function toast(msg, type = 'info') {
+  const c = document.getElementById('toast-container');
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  t.textContent = msg;
+  c.appendChild(t);
+  requestAnimationFrame(() => requestAnimationFrame(() => t.classList.add('show')));
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 3000);
+}
 
 // ── Boot ──
 init();

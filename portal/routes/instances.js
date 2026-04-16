@@ -8,7 +8,7 @@ const { INSTANCES_DIR, INSTANCES_HOST_DIR, OPENCLAW_IMAGE, NO_KEY_PROVIDERS, PRO
 const db          = require('../lib/db');
 const { docker, containerExec } = require('../lib/docker');
 const { bootstrapInstance } = require('../lib/bootstrap');
-const { requireAdmin }      = require('../lib/auth');
+const { requireAdmin, checkAuth } = require('../lib/auth');
 
 function resolveInstancePath(instanceName, relPath) {
   const base = path.join(INSTANCES_DIR, instanceName);
@@ -171,9 +171,24 @@ function register(app) {
   });
 
   // ── File management ──
-  app.get('/api/instances/:name/files', requireAdmin, (req, res) => {
-    if (!db.prepare('SELECT id FROM instances WHERE name = ?').get(req.params.name))
-      return res.status(404).json({ error: 'not found' });
+  // Accepts admin Basic auth OR instance Bearer token (gateway token) — CORS-enabled for external tools.
+  function fileCors(req, res, next) {
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  }
+
+  app.options('/api/instances/:name/files', fileCors, (req, res) => res.sendStatus(204));
+
+  app.get('/api/instances/:name/files', fileCors, (req, res) => {
+    const row = db.prepare('SELECT id, token FROM instances WHERE name = ?').get(req.params.name);
+    if (!row) return res.status(404).json({ error: 'not found' });
+    if (!checkAuth(req, row.token)) {
+      res.set('WWW-Authenticate', 'Basic realm="ClawStack"');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     try {
       const full = resolveInstancePath(req.params.name, req.query.path || '');
       const stat = fs.statSync(full);
@@ -191,9 +206,13 @@ function register(app) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  app.post('/api/instances/:name/files', requireAdmin, (req, res) => {
-    if (!db.prepare('SELECT id FROM instances WHERE name = ?').get(req.params.name))
-      return res.status(404).json({ error: 'not found' });
+  app.post('/api/instances/:name/files', fileCors, (req, res) => {
+    const row = db.prepare('SELECT id, token FROM instances WHERE name = ?').get(req.params.name);
+    if (!row) return res.status(404).json({ error: 'not found' });
+    if (!checkAuth(req, row.token)) {
+      res.set('WWW-Authenticate', 'Basic realm="ClawStack"');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     const { path: filePath, content } = req.body;
     if (typeof content !== 'string') return res.status(400).json({ error: 'content required' });
     try {
@@ -345,7 +364,7 @@ function register(app) {
       const cfgPath    = path.join(INSTANCES_DIR, req.params.name, 'config', 'openclaw.json');
       const cfg        = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
       const providerConf = { ...(PROVIDER_CONFIGS[provider] || { baseUrl: baseUrl || '', api: 'openai-completions' }) };
-      if (baseUrl) providerConf.baseUrl = baseUrl;
+      if (provider === 'private' && baseUrl) providerConf.baseUrl = baseUrl;
       const modelId = model.startsWith(`${provider}/`) ? model.slice(provider.length + 1) : model;
       cfg.models = cfg.models || {};
       cfg.models.providers = {

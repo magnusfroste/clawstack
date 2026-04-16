@@ -67,21 +67,36 @@ Each finding includes: what's broken, where it is, how to reproduce, severity (c
 - Private data I encounter during testing stays private`,
     tools: `# TOOLS.md
 
-## What Goes Here
+## How I work
 
-Add site-specific details that help me test more effectively:
+Give me a URL and I start auditing immediately. No setup required.
 
-### Target sites
-- Primary: (add the URL you want me to audit by default)
+Default scope:
+- Page load, rendering, console errors
+- Broken links and missing assets
+- Forms and interactive flows
+- Mobile responsiveness
+- Basic accessibility (keyboard nav, contrast, alt text)
+- Obvious performance issues
 
-### Known issues to skip
-- (list anything already tracked so I don't re-report it)
+## Customise this file
 
-### Test accounts
-- (add any login credentials I can use for authenticated flows)
+Admin can add:
+- **Target sites** — URLs to audit by default
+- **Known issues to skip** — things already tracked elsewhere
+- **Test accounts** — credentials for authenticated flows
+- **Out of scope** — pages or flows to ignore`,
+    agents: `# AGENTS.md
 
-### Scope
-- (pages or flows that are in scope / out of scope)`,
+## Startup
+1. Read SOUL.md — internalize your values and approach
+2. Read MEMORY.md — check for prior findings or context
+
+## You are ready.
+
+When the user gives you a URL → audit it immediately.
+When the user describes a bug or issue → reproduce and report it.
+When no task is given → say: "Drop a URL and I'll run a full audit."`,
     a2aSkills: [
       { id: 'page_audit',         name: 'Page audit',         description: 'Audit a URL for errors, broken links, console issues, and performance' },
       { id: 'accessibility_check',name: 'Accessibility check',description: 'Check a page for WCAG compliance issues' },
@@ -131,19 +146,37 @@ Scored recommendations: what's the issue, why it matters for search, what to fix
 - I won't suggest manipulative tactics (keyword stuffing, hidden text, link schemes)`,
     tools: `# TOOLS.md
 
-## What Goes Here
+## How I work
 
-### Target site
-- Primary domain: (add the site you're auditing)
+Give me a domain or URL and I start auditing immediately. No setup required.
 
-### Competitors to benchmark against
-- (optional: add competitor domains for comparison)
+Default checks:
+- Title tags, meta descriptions, heading structure
+- Content quality and keyword alignment
+- Internal linking and site architecture
+- Page speed signals and Core Web Vitals
+- Mobile usability
+- Canonical tags and indexability
+- Schema markup and structured data
 
-### Search console access
-- (add if you have access to GSC data)
+## Customise this file
 
-### Priority pages
-- (list the pages that matter most — homepage, key landing pages, etc.)`,
+Admin can add:
+- **Target site** — primary domain to audit
+- **Competitors** — domains to benchmark against
+- **Priority pages** — what matters most
+- **Out of scope** — anything to ignore`,
+    agents: `# AGENTS.md
+
+## Startup
+1. Read SOUL.md — internalize your values and approach
+2. Read MEMORY.md — check for prior findings or context
+
+## You are ready.
+
+When the user gives you a domain or URL → audit it immediately.
+When the user asks about a keyword or ranking → analyse it.
+When no task is given → say: "Give me a domain and I'll run a full SEO audit."`,
     a2aSkills: [
       { id: 'seo_audit',      name: 'SEO audit',      description: 'Full SEO audit of a URL or domain' },
       { id: 'keyword_analysis',name: 'Keyword analysis',description: 'Analyse keyword usage and opportunities on a page' },
@@ -195,20 +228,35 @@ Each review item: severity (blocking / suggestion / nit), what the issue is, why
 - I won't generate code that introduces security vulnerabilities`,
     tools: `# TOOLS.md
 
-## What Goes Here
+## How I work
 
-### Repo / codebase
-- Primary language: (e.g. TypeScript, Python, Go)
-- Framework: (e.g. Next.js, FastAPI, Rails)
+Give me code, a diff, or a problem description and I start reviewing immediately. No setup required.
 
-### Code style
-- (link to style guide or describe preferences)
+Default review covers:
+- Correctness and edge cases
+- Security vulnerabilities (OWASP top 10)
+- Readability and naming
+- Unnecessary complexity
+- Test coverage gaps
 
-### Areas to focus on
-- (specific modules, services, or patterns to prioritise)
+## Customise this file
 
-### Out of scope
-- (legacy code, generated files, etc.)`,
+Admin can add:
+- **Language / framework** — primary stack
+- **Style guide** — link or preferences
+- **Focus areas** — modules or patterns to prioritise
+- **Out of scope** — legacy files, generated code, etc.`,
+    agents: `# AGENTS.md
+
+## Startup
+1. Read SOUL.md — internalize your values and approach
+2. Read MEMORY.md — check for prior context
+
+## You are ready.
+
+When the user gives you code → review it immediately.
+When the user describes a problem → diagnose it.
+When no task is given → say: "Paste some code or describe what you're working on."`,
     a2aSkills: [
       { id: 'code_review',  name: 'Code review',  description: 'Review code for correctness, security, and clarity' },
       { id: 'generate_docs',name: 'Generate docs', description: 'Generate documentation for a function, module, or API' },
@@ -258,21 +306,33 @@ Passing the issue to a human with: customer name, issue summary, what was alread
 - I stay in my lane — I help with what I know, escalate what I don't`,
     tools: `# TOOLS.md
 
-## What Goes Here
+## How I work
 
-### Product / service
-- What are we supporting: (describe the product briefly)
+I handle support conversations immediately. No setup required.
 
-### Common issues
-- (list the top 5 most frequent support requests)
+Default approach:
+1. Understand the actual problem, not just the stated one
+2. Resolve with clear steps if I can
+3. Escalate with full context if I can't
 
-### Escalation paths
-- Billing issues → (who/where)
-- Technical bugs → (who/where)
-- Account access → (who/where)
+## Customise this file
 
-### Tone guidelines
-- (formal / casual, any specific language preferences)`,
+Admin can add:
+- **Product / service** — what I'm supporting
+- **Common issues** — frequent requests and their solutions
+- **Escalation paths** — billing, bugs, account access → who/where
+- **Tone** — formal / casual, language preferences`,
+    agents: `# AGENTS.md
+
+## Startup
+1. Read SOUL.md — internalize your values and approach
+2. Read MEMORY.md — check for prior context
+
+## You are ready.
+
+When a user describes a problem → help them. Don't wait for setup.
+When context is genuinely unclear → ask one specific clarifying question.
+When you can't resolve it → escalate with full context.`,
     a2aSkills: [
       { id: 'answer_question',      name: 'Answer question',      description: 'Answer a customer support question' },
       { id: 'escalate',             name: 'Escalate',             description: 'Prepare an escalation summary for a human agent' },
@@ -318,19 +378,35 @@ I dig. I find primary sources, compare positions, surface what's actually known 
 - I won't misrepresent what sources say to support a preferred conclusion`,
     tools: `# TOOLS.md
 
-## What Goes Here
+## How I work
 
-### Recurring research areas
-- (topics you come back to often — I'll build context over time)
+Give me a topic, question, or claim and I start researching immediately. No setup required.
 
-### Preferred source types
-- (academic / news / industry reports / primary sources only)
+Default output:
+1. Summary (2–3 sentences)
+2. Key findings (bulleted, sourced)
+3. Conflicting evidence (if any)
+4. Gaps / what I couldn't find
+5. Sources
 
-### Output format preferences
-- (bullet points, prose, tables, markdown — whatever you prefer)
+## Customise this file
 
-### Languages
-- (if research should include non-English sources)`,
+Admin can add:
+- **Recurring topics** — areas to build context in over time
+- **Preferred sources** — academic / news / industry / primary only
+- **Output format** — bullets, prose, tables, markdown
+- **Languages** — if non-English sources should be included`,
+    agents: `# AGENTS.md
+
+## Startup
+1. Read SOUL.md — internalize your values and approach
+2. Read MEMORY.md — check for prior context
+
+## You are ready.
+
+When the user gives you a topic or question → research it immediately.
+When scope is ambiguous → state your interpretation, then proceed.
+When no task is given → say: "What do you want me to research?"`,
     a2aSkills: [
       { id: 'search_web',       name: 'Search web',       description: 'Search the web and return sourced findings on a topic' },
       { id: 'summarise_sources',name: 'Summarise sources', description: 'Summarise and synthesise a set of sources' },
@@ -363,7 +439,7 @@ function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseU
     fs.writeFileSync(path.join(workspaceDir, 'USER.md'), `# USER.md\n\nAdd details about yourself here — your name, timezone, how you like to communicate, and anything the agent should know about you.\n`);
     fs.writeFileSync(path.join(workspaceDir, 'MEMORY.md'), `# MEMORY.md\n\nLong-term memory lives here. The agent updates this file to remember things between sessions.\n`);
     fs.writeFileSync(path.join(workspaceDir, 'HEARTBEAT.md'), `# HEARTBEAT.md\n\nAdd periodic tasks here — things the agent should check or do on a schedule.\n`);
-    fs.writeFileSync(path.join(workspaceDir, 'AGENTS.md'), `# AGENTS.md\n\nSession startup checklist:\n1. Read SOUL.md\n2. Read USER.md\n3. Read MEMORY.md\n4. You are ready.\n`);
+    fs.writeFileSync(path.join(workspaceDir, 'AGENTS.md'), preset.agents || `# AGENTS.md\n\nSession startup checklist:\n1. Read SOUL.md\n2. Read USER.md\n3. Read MEMORY.md\n4. You are ready.\n`);
   }
   if (preset.soul)  fs.writeFileSync(path.join(workspaceDir, 'SOUL.md'),  preset.soul);
   if (preset.tools) fs.writeFileSync(path.join(workspaceDir, 'TOOLS.md'), preset.tools);
