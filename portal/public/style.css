@@ -216,6 +216,9 @@ a{color:var(--blue);text-decoration:none}
 .toast.success{background:#14532d;border:1px solid rgba(34,197,94,.3);color:var(--green)}
 .toast.error{background:#450a0a;border:1px solid rgba(239,68,68,.3);color:var(--red)}
 .toast.info{background:var(--surface);border:1px solid var(--border);color:var(--text2)}
+.toast-action{display:flex;align-items:center;gap:12px;pointer-events:all}
+.toast-btn{background:var(--blue);color:#fff;border:none;border-radius:var(--radius-sm);padding:4px 10px;font-size:0.78rem;font-weight:600;cursor:pointer;white-space:nowrap}
+.toast-btn:hover{background:#3b82f6}
 
 /* ── Log filter bar ── */
 #logs-filter-bar{display:none;padding:6px 14px;background:var(--surface2);border-bottom:1px solid var(--border);flex-shrink:0}

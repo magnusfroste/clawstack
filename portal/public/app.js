@@ -568,7 +568,16 @@ async function saveFile() {
   if (d.success) {
     mgrDirty = false;
     document.getElementById('mgr-status').textContent = '';
-    toast('Saved ' + mgrPath, 'success');
+    const isConfig = mgrPath.endsWith('openclaw.json');
+    if (isConfig) {
+      toastAction('openclaw.json saved — restart container to apply?', 'Restart', async () => {
+        const r = await api('POST', '/api/instances/' + mgrName + '/action', { action: 'restart' });
+        if (r.success) { toast('Restarting…', 'info'); setTimeout(refreshMgrBadge, 4000); }
+        else toast('Restart failed: ' + r.error, 'error');
+      });
+    } else {
+      toast('Saved ' + mgrPath, 'success');
+    }
   } else {
     document.getElementById('mgr-status').textContent = 'Error: ' + d.error;
     toast('Save failed: ' + d.error, 'error');
@@ -1281,6 +1290,20 @@ function toast(msg, type = 'info') {
   c.appendChild(t);
   requestAnimationFrame(() => requestAnimationFrame(() => t.classList.add('show')));
   setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 3000);
+}
+
+function toastAction(msg, label, onClick) {
+  const c = document.getElementById('toast-container');
+  const t = document.createElement('div');
+  t.className = 'toast info toast-action';
+  const span = document.createElement('span'); span.textContent = msg;
+  const btn  = document.createElement('button');
+  btn.className = 'toast-btn'; btn.textContent = label;
+  btn.onclick = () => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); onClick(); };
+  t.appendChild(span); t.appendChild(btn);
+  c.appendChild(t);
+  requestAnimationFrame(() => requestAnimationFrame(() => t.classList.add('show')));
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 12000);
 }
 
 // ── Boot ──
