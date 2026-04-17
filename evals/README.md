@@ -20,6 +20,8 @@ evals/
 | SIM-002 | Business process audits | OBJ-001/002/005 | ✅ 2026-04-15 |
 | SIM-008 | Full lead lifecycle — visitor → operator | OBJ-003 | ✅ 2026-04-17 |
 | SIM-009 | Q2C — order → invoice | OBJ-002 | ✅ 2026-04-17 |
+| SIM-009b | MCP write audit — 67 tools, 10/10 write | OBJ-001/002 | ✅ 2026-04-17 |
+| SIM-009c | Autonomous blog from live business data | OBJ-001 | ✅ 2026-04-17 |
 | SIM-010 | Lead lifecycle — qualify → outreach/task | OBJ-003 | 🔲 TODO |
 | SIM-011 | Expense compliance — VAT audit | OBJ-005 | 🔲 TODO |
 | SIM-012 | Content — missing meta descriptions | OBJ-001 | 🔲 TODO |
