@@ -36,6 +36,7 @@ app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 require('./routes/system').register(app);
 require('./routes/instances').register(app);
 require('./routes/paperclip').register(app);
+require('./routes/bridge').register(app);
 
 // ── SPA / index.html (admin portal) ──────────────────────────────────────────
 function servePortal(req, res) {
