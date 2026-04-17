@@ -18,7 +18,7 @@ ClawStack removes both barriers.
 
 **The infrastructure barrier** — domains, HTTPS, container lifecycle, API key management — is handled automatically. Fill in a form, click Create, done. Each agent gets its own domain with automatic TLS, isolated from every other instance on the same server.
 
-**The configuration barrier** — coming soon via role presets. Pick a role (QA agent, SEO agent, dev agent, support agent, research agent) and the instance boots with the right system prompt, tools, and A2A skills already in place. No markdown archaeology required.
+**The configuration barrier** — role presets. Pick a role (QA agent, SEO agent, dev agent, support agent, research agent, FlowWink operator) and the instance boots with the right system prompt, tools, and A2A skills already in place. No markdown archaeology required.
 
 **The swarm barrier** — A2A is built into the proxy layer. Every A2A-enabled instance is immediately reachable and discoverable over HTTPS. Swarm templates will wire multiple agents together with pre-configured peering, so a team of collaborating agents is as easy to spin up as a single one.
 
@@ -80,11 +80,25 @@ ClawStack portal (routes by hostname → container)
 OpenClaw container (internal Docker network)
 ```
 
-## Agent roles (coming soon)
+## Agent roles
 
-OpenClaw is a powerful but horizontal tool — it does not arrive with a purpose. ClawStack will ship opinionated **role presets** that configure each instance for a specific job from the start: QA agent, SEO agent, dev agent, support agent, research agent. Pick a role at creation time and the instance boots ready to work, with the right system prompt, tools, and A2A skills pre-configured.
+OpenClaw is a powerful but horizontal tool — it does not arrive with a purpose. ClawStack ships opinionated **role presets** that configure each instance for a specific job from the start. Pick a role at creation time and the instance boots ready to work.
 
-See [docs/PRD.md](docs/PRD.md) for the full product spec.
+| Role | What it does | Heartbeat |
+|------|-------------|-----------|
+| `generalist` | Blank slate — full control | — |
+| `qa` | Audits URLs, forms, and accessibility | 12h |
+| `seo` | SEO audits, keyword analysis, content gaps | 24h |
+| `dev` | Code review, documentation, security scanning | — |
+| `support` | Customer-facing help and escalation | 2h |
+| `research` | Web research, analysis, synthesis | — |
+| `flowwink` | Autonomous FlowWink SaaS operator | 4h |
+
+### Autonomous operators
+
+The `flowwink` role goes beyond reactive assistance — it runs a SaaS instance on autopilot. Connect it to a FlowWink installation via MCP, set the API key, and it wakes up every 4 hours to audit the pipeline, catch stuck orders, flag compliance issues, and report findings. No human in the loop unless something critical surfaces.
+
+See [docs/AUTONOMOUS-OPERATORS.md](docs/AUTONOMOUS-OPERATORS.md) for the full architecture, heartbeat mechanics, and how to build an operator for any MCP-capable SaaS.
 
 ## A2A — Agent-to-Agent communication (ClawSwarm)
 
