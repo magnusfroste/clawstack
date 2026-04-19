@@ -41,15 +41,26 @@ input::placeholder{color:var(--text3)}
 .btn.green:hover{background:var(--green);color:#fff;opacity:1}
 .btn.primary{background:var(--blue);border:none;padding:8px 18px;font-size:0.875rem}
 .badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:99px;font-size:0.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-.badge::before{content:'';width:5px;height:5px;border-radius:50%;flex-shrink:0}
-.badge.running{background:var(--green-bg);color:var(--green)}.badge.running::before{background:var(--green)}
+.badge::before{content:'';width:6px;height:7px;clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);flex-shrink:0}
+.badge.running{background:var(--green-bg);color:var(--green)}.badge.running::before{background:var(--green);filter:drop-shadow(0 0 3px rgba(34,197,94,.8))}
 .badge.stopped{background:var(--surface2);color:var(--text3)}.badge.stopped::before{background:var(--text3)}
-.badge.error{background:var(--red-bg);color:var(--red)}.badge.error::before{background:var(--red)}
-.badge.starting{background:var(--amber-bg);color:var(--amber)}.badge.starting::before{background:var(--amber)}
+.badge.error{background:var(--red-bg);color:var(--red)}.badge.error::before{background:var(--red);filter:drop-shadow(0 0 3px rgba(239,68,68,.8))}
+.badge.starting{background:var(--amber-bg);color:var(--amber)}.badge.starting::before{background:var(--amber);filter:drop-shadow(0 0 3px rgba(245,158,11,.8))}
 .badge.role{background:var(--surface2);color:var(--text2)}.badge.role::before{display:none}
 .instances{display:flex;flex-direction:column;gap:0.5rem}
-.inst-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.25rem;display:flex;align-items:center;gap:1rem;transition:border-color .15s}
+.inst-card{background:var(--surface);border:1px solid var(--border);border-left:3px solid transparent;border-radius:var(--radius);padding:1rem 1.25rem;display:flex;align-items:center;gap:1rem;transition:border-color .15s,box-shadow .15s}
 .inst-card:hover{border-color:var(--border2)}
+.inst-card.running{box-shadow:0 0 0 1px rgba(34,197,94,.08) inset}
+.inst-card.role-flowwink{border-left-color:var(--blue)}
+.inst-card.role-flowwink.running{border-left-color:var(--blue);box-shadow:0 0 12px rgba(59,130,246,.07) inset}
+.inst-card.role-qa{border-left-color:var(--amber)}
+.inst-card.role-seo{border-left-color:var(--green)}
+.inst-card.role-dev{border-left-color:#6366f1}
+.inst-card.role-support{border-left-color:var(--green)}
+.inst-card.role-research{border-left-color:var(--amber)}
+.inst-avatar{width:34px;height:34px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:16px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)}
+.inst-card.running .inst-avatar{border-color:rgba(34,197,94,.25);background:rgba(34,197,94,.05)}
+.inst-card.role-flowwink .inst-avatar{border-color:rgba(59,130,246,.25);background:rgba(59,130,246,.06)}
 .inst-main{flex:1;min-width:0}
 .inst-name{font-size:0.925rem;font-weight:600;color:var(--text);display:flex;align-items:center;gap:8px}
 .inst-name-link{color:inherit;text-decoration:none;cursor:pointer}.inst-name-link:hover{color:var(--blue)}
@@ -64,6 +75,7 @@ input::placeholder{color:var(--text3)}
 .inst-actions{display:flex;gap:5px;align-items:center;flex-shrink:0}
 .divider{width:1px;height:18px;background:var(--border);flex-shrink:0}
 a{color:var(--blue);text-decoration:none}
+.role-preview-box{margin-top:6px;padding:7px 11px;background:var(--blue-bg);border:1px solid rgba(59,130,246,.2);border-radius:var(--radius-sm);font-size:0.75rem;color:var(--text2);line-height:1.4}
 .cname-notice{margin-top:6px;padding:7px 11px;background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);border-radius:var(--radius-sm);font-size:0.75rem;color:var(--amber);line-height:1.5;display:none}
 .cname-notice code{color:#fcd34d;background:rgba(0,0,0,.3);padding:1px 5px;border-radius:3px;font-size:0.72rem}
 .empty{padding:2.5rem;text-align:center;color:var(--text3);font-size:0.875rem;border:1px dashed var(--border);border-radius:var(--radius)}
@@ -80,6 +92,9 @@ a{color:var(--blue);text-decoration:none}
 .tab{padding:8px 14px;font-size:0.78rem;font-weight:500;cursor:pointer;color:var(--text3);border-bottom:2px solid transparent;transition:color .15s;user-select:none}
 .tab:hover{color:var(--text2)}
 .tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.tab.tab-danger{color:rgba(239,68,68,.5)}
+.tab.tab-danger:hover{color:var(--red)}
+.tab.tab-danger.active{color:var(--red);border-bottom-color:var(--red)}
 #mgr-body{display:flex;flex:1;overflow:hidden}
 #mgr-tree{width:240px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border);font-size:0.76rem;font-family:monospace;padding:6px 0;background:var(--surface)}
 #mgr-right{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -204,6 +219,21 @@ a{color:var(--blue);text-decoration:none}
 /* ── Pulse animation for starting badge ── */
 @keyframes pulse-badge{0%,100%{opacity:1}50%{opacity:.4}}
 .badge.starting{animation:pulse-badge 1.2s ease-in-out infinite}
+
+/* ── Delete confirmation modal ── */
+#del-modal{display:none;position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.75);backdrop-filter:blur(4px);align-items:center;justify-content:center}
+#del-modal.open{display:flex}
+.del-box{background:var(--surface);border:1px solid rgba(239,68,68,.3);border-radius:var(--radius);padding:2rem;max-width:400px;width:90%;box-shadow:0 0 40px rgba(239,68,68,.12),0 20px 60px rgba(0,0,0,.6);display:flex;flex-direction:column;gap:1rem}
+.del-crystal{font-size:2rem;color:var(--red);text-align:center;filter:drop-shadow(0 0 8px rgba(239,68,68,.5))}
+.del-title{font-size:1.05rem;font-weight:700;color:var(--text);text-align:center}
+.del-msg{font-size:0.84rem;color:var(--text2);text-align:center;line-height:1.6}
+.del-msg strong{color:var(--text)}
+.del-hint{font-size:0.7rem;color:var(--text3);text-transform:uppercase;letter-spacing:.05em}
+.del-input{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--radius-sm);font-size:0.875rem;font-family:monospace;outline:none;width:100%;transition:border-color .15s}
+.del-input:focus{border-color:var(--red)}
+.del-input.shake{animation:shake .35s ease}
+.del-actions{display:flex;gap:.75rem;justify-content:flex-end}
+@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-7px)}40%,80%{transform:translateX(7px)}}
 
 /* ── Streaming cursor ── */
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}

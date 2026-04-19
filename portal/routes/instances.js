@@ -60,7 +60,7 @@ function register(app) {
 
   // ── Create instance ──
   app.post('/api/instances', requireAdmin, async (req, res) => {
-    const { name, domain, provider, model, baseUrl, enableA2A, role, image, allowAll } = req.body;
+    const { name, domain, provider, model, baseUrl, enableA2A, role, image, allowAll, mcpUrl, mcpKey } = req.body;
     const apiKey = NO_KEY_PROVIDERS.has(provider) ? (req.body.apiKey || 'none') : req.body.apiKey;
     if (!name || !domain || !provider || !model || (!NO_KEY_PROVIDERS.has(provider) && !apiKey))
       return res.status(400).json({ error: 'name, domain, provider, model required (and apiKey for this provider)' });
@@ -79,7 +79,7 @@ function register(app) {
     }
 
     try {
-      bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl, enableA2A: !!enableA2A, role: role || 'generalist', allowAll: !!allowAll });
+      bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl, enableA2A: !!enableA2A, role: role || 'generalist', allowAll: !!allowAll, mcpUrl, mcpKey });
     } catch (e) {
       db.prepare('DELETE FROM instances WHERE name = ?').run(name);
       return res.status(500).json({ error: `Bootstrap failed: ${e.message}` });
@@ -132,8 +132,10 @@ function register(app) {
   app.delete('/api/instances/:name', requireAdmin, async (req, res) => {
     const row = db.prepare('SELECT * FROM instances WHERE name = ?').get(req.params.name);
     if (!row) return res.status(404).json({ error: 'not found' });
+    const instanceDir = await getInstanceDir(row.container_name, req.params.name);
     try { const c = docker.getContainer(row.container_name); await c.stop().catch(() => {}); await c.remove().catch(() => {}); } catch {}
     db.prepare('DELETE FROM instances WHERE name = ?').run(req.params.name);
+    try { if (instanceDir) fs.rmSync(instanceDir, { recursive: true, force: true }); } catch {}
     res.json({ success: true });
   });
 

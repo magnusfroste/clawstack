@@ -44,6 +44,7 @@
           <div class="field full">
             <label>Role</label>
             <select name="role" id="role" onchange="onRoleChange(this)"></select>
+            <div id="role-preview" class="role-preview-box" style="display:none"></div>
           </div>
           <div class="field"><label>Name</label><input name="name" placeholder="acme" required></div>
           <div class="field">
@@ -64,6 +65,8 @@
           <div class="field full"><label>OpenClaw image</label><input name="image" id="image" placeholder="ghcr.io/openclaw/openclaw:2026.3.24" autocomplete="off"></div>
           <div class="field full" id="baseurl-row" style="display:none"><label>Base URL</label><input name="baseUrl" id="baseUrl" type="url" placeholder="http://localhost:11434/v1" autocomplete="off"></div>
           <div class="field full" id="apikey-row"><label>API Key</label><input name="apiKey" id="apiKey" type="password" placeholder="sk-..." autocomplete="off"></div>
+          <div class="field full" id="mcp-row" style="display:none"><label>Flowwink MCP URL</label><input name="mcpUrl" id="mcpUrl" type="url" placeholder="https://xyz.supabase.co/functions/v1/mcp-server" autocomplete="off"></div>
+          <div class="field full" id="mcpkey-row" style="display:none"><label>Flowwink API Key <span style="font-weight:400;color:var(--text3)">fwk_… — create a peer in Flowwink Federation → copy the key</span></label><input name="mcpKey" id="mcpKey" type="password" placeholder="fwk_..." autocomplete="off"></div>
           <div class="full" style="margin-top:4px;display:flex;align-items:center;justify-content:space-between;gap:1rem">
             <div style="display:flex;gap:1.25rem">
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:0.78rem;color:var(--text3);text-transform:none;letter-spacing:0;font-weight:400">
@@ -72,7 +75,7 @@
               </label>
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:0.78rem;color:var(--text3);text-transform:none;letter-spacing:0;font-weight:400" title="Allow everything: bot acts immediately without asking (YOLO mode)">
                 <input type="checkbox" name="allowAll" value="1" style="width:auto;accent-color:var(--blue)">
-                Allow all actions (YOLO mode)
+                Autonomous mode
               </label>
             </div>
             <button type="submit" class="btn primary">Create instance</button>
@@ -381,7 +384,7 @@
     <div class="tab"        id="tab-chat"     onclick="switchTab('chat')">Chat</div>
     <div class="tab"        id="tab-model"    onclick="switchTab('model')">Model</div>
     <div class="tab"        id="tab-cli"      onclick="switchTab('cli')">CLI</div>
-    <div class="tab"        id="tab-exec"     onclick="switchTab('exec')">Exec (root)</div>
+    <div class="tab tab-danger" id="tab-exec" onclick="switchTab('exec')">Exec (root)</div>
     <div class="tab"        id="tab-terminal" onclick="switchTab('terminal')">Terminal</div>
     <div class="tab"        id="tab-version"  onclick="switchTab('version')">Version</div>
   </div>
@@ -520,6 +523,22 @@
     </div>
   </div>
 </div><!-- /mgr -->
+
+<!-- ══ Delete confirmation modal ══ -->
+<div id="del-modal">
+  <div class="del-box">
+    <div class="del-crystal">⬡</div>
+    <div class="del-title">Delete instance</div>
+    <div class="del-msg">This will permanently remove <strong id="del-modal-name"></strong> and all its data. This cannot be undone.</div>
+    <div class="del-hint">Type the instance name to confirm</div>
+    <input id="del-confirm-input" class="del-input" placeholder="instance name" autocomplete="off" spellcheck="false"
+      onkeydown="if(event.key==='Enter')confirmDelete()">
+    <div class="del-actions">
+      <button class="btn ghost" onclick="cancelDelete()">Cancel</button>
+      <button class="btn danger" onclick="confirmDelete()">Delete permanently</button>
+    </div>
+  </div>
+</div>
 
 <div id="toast-container"></div>
 <script>window.__auth = %%AUTH%%;</script>

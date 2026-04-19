@@ -58,7 +58,10 @@ async function init() {
 }
 
 let __cachedInstances = [];
-let newFormOpen = true, newFormInitialized = false;
+let newFormOpen = false, newFormInitialized = false;
+
+const ROLE_EMOJI = { flowwink: '🦞', qa: '🔍', seo: '📈', dev: '🛠️', support: '💬', research: '🔬', generalist: '🤖' };
+const ROLE_COLOR = { flowwink: 'var(--blue)', qa: 'var(--amber)', seo: 'var(--green)', dev: 'var(--blue-dim)', support: 'var(--green)', research: 'var(--amber)' };
 
 function relativeTime(dateStr) {
   if (!dateStr) return '';
@@ -87,7 +90,7 @@ function renderInstanceCards(instances) {
   const list = document.getElementById('instances-list');
   const q = document.getElementById('inst-search').value.trim();
   if (!instances.length) {
-    list.innerHTML = `<div class="empty">${q ? 'No instances match "' + esc(q) + '"' : 'No instances yet. Create one above.'}</div>`;
+    list.innerHTML = `<div class="empty">${q ? 'No instances match "' + esc(q) + '"' : 'No agents deployed yet. Create one above.'}</div>`;
     return;
   }
   const defaultImage = __initData.defaultImage || '';
@@ -95,14 +98,16 @@ function renderInstanceCards(instances) {
     const img = i.image || defaultImage;
     const imgTag = img.split(':')[1] || img;
     const age = relativeTime(i.created_at);
-    return `<div class="inst-card">
+    const emoji = ROLE_EMOJI[i.role] || '🤖';
+    const st = i.status || 'stopped';
+    return `<div class="inst-card ${esc(st)} role-${esc(i.role || 'generalist')}">
+      <div class="inst-avatar">${emoji}</div>
       <div class="inst-main">
         <div class="inst-name">
           <a class="inst-name-link" href="/instances/${esc(i.name)}" onclick="event.preventDefault();openMgr('${esc(i.name)}','files','${esc(img)}')">${esc(i.name)}</a>
-          <span class="badge ${i.status}" id="badge-${i.name}">${i.status}</span>
-          ${i.role && i.role !== 'generalist' ? `<span class="badge role">${esc(i.role)}</span>` : ''}
+          <span class="badge ${st}" id="badge-${i.name}">${st}</span>
         </div>
-        ${i.liveModel ? `<div class="inst-meta">${esc(i.liveModel)}</div>` : ''}
+        <div class="inst-meta">${i.liveModel ? esc(i.liveModel) + ' · ' : ''}${i.role && i.role !== 'generalist' ? esc(i.role) : 'generalist'}</div>
         <div class="inst-meta" title="${esc(img)}">${esc(imgTag)}${age ? ` · ${age}` : ''}</div>
       </div>
       <a class="inst-domain" href="https://${esc(i.domain)}" target="_blank">${esc(i.domain)}</a>
@@ -120,13 +125,48 @@ function renderInstanceCards(instances) {
         <div class="divider"></div>
         <button class="btn amber sm" onclick="rowAction('${esc(i.name)}','restart')" title="Restart">↺</button>
         <button class="btn ghost sm" id="stopstart-${i.name}" onclick="rowAction('${esc(i.name)}','${i.status === 'running' ? 'stop' : 'start'}')">${i.status === 'running' ? '■' : '▶'}</button>
-        <form method="post" action="/admin/instances/${esc(i.name)}/delete" style="margin:0">
-          <button type="submit" class="btn danger sm" onclick="return confirm('Delete ${esc(i.name)}?')">✕</button>
-        </form>
+        <button class="btn danger sm" onclick="deleteInstance('${esc(i.name)}')" title="Delete instance">✕</button>
       </div>
     </div>`;
   }).join('')}</div>`;
 }
+
+// ── Delete confirmation ──
+let __pendingDelete = null;
+
+function deleteInstance(name) {
+  __pendingDelete = name;
+  document.getElementById('del-modal-name').textContent = name;
+  document.getElementById('del-confirm-input').value = '';
+  document.getElementById('del-confirm-input').classList.remove('shake');
+  document.getElementById('del-modal').classList.add('open');
+  setTimeout(() => document.getElementById('del-confirm-input').focus(), 80);
+}
+
+async function confirmDelete() {
+  const val = document.getElementById('del-confirm-input').value.trim();
+  if (val !== __pendingDelete) {
+    const inp = document.getElementById('del-confirm-input');
+    inp.classList.remove('shake');
+    void inp.offsetWidth;
+    inp.classList.add('shake');
+    return;
+  }
+  document.getElementById('del-modal').classList.remove('open');
+  await api('DELETE', '/api/instances/' + __pendingDelete);
+  __pendingDelete = null;
+  await loadInstances();
+  toast('Instance deleted', 'info');
+}
+
+function cancelDelete() {
+  document.getElementById('del-modal').classList.remove('open');
+  __pendingDelete = null;
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('del-modal').classList.contains('open')) cancelDelete();
+});
 
 async function loadInstances() {
   const countEl = document.getElementById('instances-count');
@@ -196,9 +236,28 @@ setInterval(pollStatus, 15000);
 
 // ── Form: provider / role changes ──
 function onRoleChange(s) {
-  const role = (__initData.agentRoles || {})[s.value];
-  const a2aBox = document.querySelector('input[name="enableA2A"]');
-  if (a2aBox) a2aBox.checked = s.value !== 'generalist';
+  const role       = s.value;
+  const isFlowwink = role === 'flowwink';
+
+  const a2aBox  = document.querySelector('input[name="enableA2A"]');
+  const yoloBox = document.querySelector('input[name="allowAll"]');
+  if (a2aBox)  a2aBox.checked  = false;
+  if (yoloBox) yoloBox.checked = isFlowwink;
+
+  document.getElementById('mcp-row').style.display    = isFlowwink ? '' : 'none';
+  document.getElementById('mcpkey-row').style.display = isFlowwink ? '' : 'none';
+  document.getElementById('mcpUrl').required          = isFlowwink;
+  document.getElementById('mcpKey').required          = isFlowwink;
+
+  const roleData = (__initData.agentRoles || {})[role];
+  const preview  = document.getElementById('role-preview');
+  if (roleData && role !== 'generalist') {
+    const emoji = ROLE_EMOJI[role] || '';
+    preview.innerHTML = `<span style="margin-right:6px">${emoji}</span>${esc(roleData.description)}`;
+    preview.style.display = '';
+  } else {
+    preview.style.display = 'none';
+  }
 }
 
 function onProviderChange(s) {

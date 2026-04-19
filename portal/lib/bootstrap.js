@@ -20,7 +20,7 @@ function deepMerge(base, override) {
 
 const AGENT_ROLES = {
   generalist: {
-    label: 'Generalist', description: 'Blank slate — full control',
+    label: 'Default', description: 'Stock OpenClaw — LLM + browser preconfigured, workspace blank',
     identity: null, soul: null, tools: null, a2aSkills: [], presetConfig: null,
     heartbeat: null,
   },
@@ -28,7 +28,7 @@ const AGENT_ROLES = {
     label: 'QA agent', description: 'Tests and audits web properties',
     identity: `# IDENTITY.md
 
-- **Name:** ${'{name}'}
+- **Name:** \${'name'}
 - **Creature:** QA agent
 - **Vibe:** Methodical, precise, relentless about quality
 - **Emoji:** 🔍
@@ -110,7 +110,7 @@ When no task is given → say: "Drop a URL and I'll run a full audit."`,
     label: 'SEO agent', description: 'Audits and improves search visibility',
     identity: `# IDENTITY.md
 
-- **Name:** ${'{name}'}
+- **Name:** \${'name'}
 - **Creature:** SEO agent
 - **Vibe:** Data-driven, patient, thinks in search intent
 - **Emoji:** 📈
@@ -191,7 +191,7 @@ When no task is given → say: "Give me a domain and I'll run a full SEO audit."
     label: 'Dev agent', description: 'Code review, docs, and technical analysis',
     identity: `# IDENTITY.md
 
-- **Name:** ${'{name}'}
+- **Name:** \${'name'}
 - **Creature:** Dev agent
 - **Vibe:** Direct, precise, has opinions about code
 - **Emoji:** 🛠️
@@ -272,7 +272,7 @@ When no task is given → say: "Paste some code or describe what you're working 
     label: 'Support agent', description: 'Customer-facing help and escalation',
     identity: `# IDENTITY.md
 
-- **Name:** ${'{name}'}
+- **Name:** \${'name'}
 - **Creature:** Support agent
 - **Vibe:** Warm, patient, solution-focused
 - **Emoji:** 💬
@@ -348,7 +348,7 @@ When you can't resolve it → escalate with full context.`,
     label: 'Research agent', description: 'Web research, analysis, and synthesis',
     identity: `# IDENTITY.md
 
-- **Name:** ${'{name}'}
+- **Name:** \${'name'}
 - **Creature:** Research agent
 - **Vibe:** Thorough, curious, allergic to unsourced claims
 - **Emoji:** 🔬
@@ -573,13 +573,14 @@ Submit findings via \`openclaw_report_finding\`:
 
 Type is free-form. Severity: critical = revenue impact, high = SLA breach, medium = quality gap, low = optimization, info = healthy observation.`,
     a2aSkills: [],
+    allowExec: true,
     heartbeat: { every: '4h', prompt: 'HEARTBEAT — read HEARTBEAT.md and execute your scheduled objectives for this time window. Respond with HEARTBEAT_OK if the schedule says to sleep.', target: 'none' },
     presetMcp: {
       servers: {
         flowwink: {
-          url: 'REPLACE_WITH_YOUR_FLOWWINK_MCP_URL',
+          url: '${FLOWWINK_MCP_URL}',
           transport: 'streamable-http',
-          headers: { 'x-api-key': 'REPLACE_WITH_YOUR_FLOWWINK_API_KEY' },
+          headers: { 'x-api-key': '${FLOWWINK_MCP_KEY}' },
         }
       }
     },
@@ -637,7 +638,7 @@ If you find a \`critical\` severity issue:
   },
 };
 
-function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl, enableA2A, role, allowAll }) {
+function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseUrl, enableA2A, role, allowAll, mcpUrl, mcpKey }) {
   const configDir    = path.join(INSTANCES_DIR, name, 'config');
   const agentDir     = path.join(configDir, 'agents', 'main', 'agent');
   const sessionsDir  = path.join(configDir, 'agents', 'main', 'sessions');
@@ -690,7 +691,7 @@ function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseU
       model: { primary: fullModelRef },
       ...(preset.heartbeat ? { heartbeat: preset.heartbeat } : {}),
     } },
-    tools:  { exec: { ask: allowAll ? 'off' : 'always' } },
+    tools:  { exec: { ask: (allowAll || preset.allowExec) ? 'off' : 'always' } },
     gateway: {
       mode: 'local', bind: 'lan',
       remote: { url: `https://${domain}` },
@@ -702,7 +703,13 @@ function bootstrapInstance({ name, domain, provider, apiKey, model, token, baseU
         dangerouslyDisableDeviceAuth: true,
       },
     },
-    ...(preset.presetMcp ? { mcp: preset.presetMcp } : {}),
+    ...(preset.presetMcp ? {
+      mcp: JSON.parse(
+        JSON.stringify(preset.presetMcp)
+          .replace(/\$\{FLOWWINK_MCP_URL\}/g, mcpUrl || '')
+          .replace(/\$\{FLOWWINK_MCP_KEY\}/g, mcpKey || '')
+      )
+    } : {}),
     ...(enableA2A ? {
       plugins: {
         entries: {

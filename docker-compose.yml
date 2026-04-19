@@ -40,6 +40,9 @@ services:
       - ${PWD}/instances:/instances
       - /opt/clawstack/instances:/opt/clawstack/instances
       - .:/clawstack-config
+      - ./portal/public:/app/public
+      - ./portal/lib:/app/lib
+      - ./portal/routes:/app/routes
     networks:
       - clawstack
     mem_limit: 256m
