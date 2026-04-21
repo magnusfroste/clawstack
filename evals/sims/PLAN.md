@@ -209,3 +209,5 @@ Period-close är per definition ett undantagsflöde fullt av manuella beslut: vi
 | SIM-014 | Reorder Watcher | 📝 Planerad | — |
 | SIM-015 | 3-Way Match | 📝 Planerad | `match_purchase_invoice` |
 | SIM-016 | Period-End Close | 📝 Planerad | `period_close_workflow` |
+| SIM-017 | Bank Reconciliation | 📝 Planerad | Bank reconciliation module |
+| SIM-018 | Timesheet to Invoice | 📝 Planerad | Timesheet-to-invoice workflow |
