@@ -82,14 +82,26 @@ Rapportera varje fynd via openclaw_report_finding.
 
 ## Resultat
 
-*Fylls i efter körning*
+**Datum dispatched:** 2026-04-22
+**Rekonstruerat från:** FlowWink `scan_beta_findings` (tabell `beta_findings`), 18 findings skapade 2026-04-22
+**Antal fynd:** 18 (hög+medium+låg blandat)
 
-**Antal fynd:** TBD  
-**A1 Westfield hittad:** TBD  
-**A2 Bergman hittad:** TBD  
-**A3 TechHub hittad:** TBD  
-**A4 Apex hittad:** TBD  
-**Total SEK i riskzon:** TBD / 1 225 000 SEK möjligt
+### Anomali-match mot planterade scener
+
+| Planterat | Hittat? | Finding-ID | Notering |
+|-----------|---------|------------|----------|
+| **A1 Westfield** (draft-kontrakt + closed_won deal) | ✅ JA | `bba21815-540a-460e-8724-3e8f63a97837` (SE), `0a76fffd-802d-4803-b088-5f52c1da0d28` (EN), `c7a64a17-335f-459e-bf66-d631eab407a5` | Kontraktet flaggat som "sänt för signatur 2026-04-12, ingen påminnelse" — värde 480 000 SEK (48 000 000 öre) |
+| **A2 Bergman & Partners** (pipeline-duplikat, två parallella qualified deals) | ⚠️ DELVIS | `b1e77fa4-af82-4832-8941-2eefd248fd90`, `965eaaaf-e4f9-4e30-a1d6-166309016463` | ClawWink noterade Erik och Malin Bergman som cold leads men kopplade dem INTE som duplicate pipeline — domän-matchningen uteblev |
+| **A3 TechHub Stockholm** (stagnerad 19 dagar) | ✅ JA | `d2abc259-6d1d-4eae-ad5b-21cb50f4e69f`, `30352fef-ce56-4219-b3ba-a594036d37a4` | 320 000 SEK deal, offert 2026-04-03, "ingen återkoppling på 19 dagar" — exakt det scenariot beskrev |
+| **A4 Apex Nordic** (churn, kontrakt löper ut 05-04) | ✅ JA | `4fe7004a-a806-4eaa-9cdd-e726dbd62ea3` | 240 000 SEK/år, slutdatum 2026-05-04, ingen förnyelsedeal — flaggat som churn-risk |
+
+**Score:** 3 av 4 planterade anomalier fångade med cross-module reasoning. A2 (duplicate deals) missad — ClawWink såg kunder men inte duplikaten.
+
+**Total SEK belagt i findings:** 480 000 + 240 000 + 320 000 = **1 040 000 SEK** av möjliga 1 225 000 SEK.
+
+### Bonus-fynd (ej planterade)
+
+ClawWink hittade dessutom 4 unqualified cold leads (Sofia Karlsson, Malin Bergman, Erik Bergman, Jonas Lindqvist) och en content-cadence-gap (ingen blogpost på 7 dagar). Dessa var inte en del av spelledarens rigg men är legitima operational findings.
 
 ---
 

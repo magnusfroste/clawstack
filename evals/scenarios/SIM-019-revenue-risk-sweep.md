@@ -95,19 +95,42 @@ Begin sweep now.
 
 ## Resultat
 
-*Fylls i efter körning*
-
-**Datum:** 2026-04-21  
-**Total risk identifierad:** TBD SEK  
-**Antal fynd:** TBD  
-**Täckta dimensioner:** TBD/6  
+**Datum dispatched:** 2026-04-21
+**Rekonstruerat från:** FlowWink `scan_beta_findings` (tabell `beta_findings`)
+**Antal fynd:** 3 (alla `medium` severity)
+**Täckta dimensioner:** 1 av 6 (endast draft-kontrakt)
+**Total risk identifierad i SEK:** 0 (inga belopp sattes på fynden)
 
 ### Fynd
 
-*Listas efter körning*
+| Timestamp | Type | Title | ID |
+|-----------|------|-------|----|
+| 2026-04-21 10:57 | stale_entity | Draft contract present over 2 hours without progress (contract 'test') | `b30a8908-5e70-4f80-8348-5d8e3fc0106c` |
+| 2026-04-21 14:56 | broken_chain | compliance-hygiene: Expense audit failed — system error (`invalid input syntax for type date`) | `72991c19-3f51-40c2-9bc7-1e14c76f4ebc` |
+| 2026-04-21 19:26 | stale_entity | OBJ-003: Draft contract still pending signature (samma 'test'-kontrakt) | `61ed5ef7-7dc9-4361-9e3b-e2c9c919ff3c` |
+
+### Status vs framgångskriterier
+
+| Kriterium | Resultat |
+|-----------|----------|
+| Täcker ≥ 4 riskdimensioner | ❌ 1 dimension (draft-kontrakt) |
+| Kvantifierar varje fynd i SEK | ❌ 0 SEK angivet |
+| Anger riskprioritering | ⚠️ endast medium |
+| Skapar minst ett actionable finding | ✅ 3 stycken |
+| Förklarar varför varje fynd inte kan fångas av automation | ❌ nej |
 
 ---
 
 ## Lärdomar
 
-*Fylls i efter analys*
+**Instruktionsfällan.** Den dispatched prompten listade explicit sex dimensioner att sweep:a — men ClawWink återvände ändå en smal compliance-lista, inte en bred diagnostisk sweep. Två förklaringar:
+
+1. **MCP-ytan saknade bredd vid körning.** Flera av de listade dimensionerna (delivered orders utan faktura, pipeline-duplikat via domän-matchning, kontrakt nära utgång) krävde tool-anrop som antingen var under-implementerade eller blockerade av trust-level `approve` den dagen.
+2. **Prescriptive prompt → instruction-compliance, inte autonomi.** Detta är just argumentet SIM-020 designades för att motbevisa — att en öppen prompt producerar rikare diagnostik än en checklista. SIM-020:s resultat (18 findings inklusive cross-module Westfield) bekräftar det.
+
+**Re-run-rekommendation.** MCP-ytan är bredare nu (137 tools, flera generiska CRUD-wrappers). En öppen-prompt SIM-019-körning idag skulle sannolikt ge betydligt starkare resultat. Kör om innan handboken går live om möjligt.
+
+**Handbook-koppling.** Ch03 "Day One (SIM-019): The Unprompted Sweep — €1.1 million of risk" kan INTE beläggas från detta scenarios findings. Antingen:
+- Reframe Ch03 Day One som en separat tidigare körning (utan SIM-numrering), eller
+- Kör om SIM-019 med öppen prompt och uppdatera Resultat, eller
+- Markera Ch03 Day One som `partial` evidens.
