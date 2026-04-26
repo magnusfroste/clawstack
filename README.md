@@ -2,7 +2,13 @@
 
 The internet was the first acceleration. Generative AI was the second. Agentic autonomy is the third.
 
-[OpenClaw](https://openclaw.dev) puts a persistent, tool-using AI agent in the hands of anyone — browsing the web, writing code, managing files, and acting on your behalf around the clock. ClawStack is the missing infrastructure layer: spin up and host a swarm of OpenClaw instances (**ClawSwarm**) on your own hardware, each with its own domain, HTTPS, and full isolation. One server. Unlimited agents.
+[OpenClaw](https://openclaw.dev) puts a persistent, tool-using AI agent in the hands of anyone — browsing the web, writing code, managing files, and acting on your behalf around the clock. ClawStack is the missing infrastructure layer above it.
+
+**Today**, ClawStack hosts a swarm of OpenClaw instances on your own hardware — each with its own domain, HTTPS, and full isolation, plus role presets and A2A peering so a swarm is as easy to launch as a single agent. One server, unlimited agents.
+
+**Vision**: ClawStack becomes the **agent simulation and testing platform**. Spawn populations of OpenClaw personas — a visitor, an accountant, a salesperson, a support lead — point them at a SaaS, let them act for hours or days, and let a senior operator-agent observe what emerges. The deliverable is an *Emergent Findings Report*: cross-module risks, UX gaps, broken chains that no human tester would have produced, surfaced by agents observing agents. OpenClaw's persona depth (SOUL + HEARTBEAT + memory) makes it the only framework today that does this convincingly. ClawStack is the substrate that makes it shippable.
+
+The hosting product and the simulation product share the same multi-OpenClaw substrate. Different UIs and contracts on top.
 
 ## The problem
 
