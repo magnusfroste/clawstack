@@ -116,6 +116,7 @@ function register(app) {
           Binds: [
             `${INSTANCES_HOST_DIR}/${name}/config:/home/node/.openclaw`,
             `${INSTANCES_HOST_DIR}/${name}/workspace:/home/node/.openclaw/workspace`,
+            ...(name === 'clawwink' ? [`${INSTANCES_HOST_DIR}:/opt/clawstack/instances`] : []),
           ],
         },
       });
@@ -179,6 +180,7 @@ function register(app) {
           Binds: [
             `${INSTANCES_HOST_DIR}/${row.name}/config:/home/node/.openclaw`,
             `${INSTANCES_HOST_DIR}/${row.name}/workspace:/home/node/.openclaw/workspace`,
+            ...(row.name === 'clawwink' ? [`${INSTANCES_HOST_DIR}:/opt/clawstack/instances`] : []),
           ],
         },
       });

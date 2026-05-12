@@ -15,6 +15,7 @@ services:
     environment:
       - CADDY_EMAIL=${CADDY_EMAIL}
       - BASE_DOMAIN=${BASE_DOMAIN}
+      - PAPERCLIP_DOMAIN=${PAPERCLIP_DOMAIN}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
@@ -33,12 +34,12 @@ services:
       - BASE_DOMAIN=${BASE_DOMAIN}
       - OPENCLAW_IMAGE=${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
       - TZ=${TZ:-Europe/Stockholm}
-      - INSTANCES_HOST_DIR=${PWD}/instances
+      - INSTANCES_HOST_DIR=${INSTANCES_HOST_DIR}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portal_data:/data
-      - ${PWD}/instances:/instances
-      - /opt/clawstack/instances:/opt/clawstack/instances
+      - ${INSTANCES_HOST_DIR}:/instances
+      - ${INSTANCES_HOST_DIR}:/opt/clawstack/instances
       - .:/clawstack-config
       - ./portal/public:/app/public
       - ./portal/lib:/app/lib

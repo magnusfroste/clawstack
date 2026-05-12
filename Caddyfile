@@ -1,28 +1,25 @@
 {
-  email {$CADDY_EMAIL}
-  on_demand_tls {
-    ask http://portal:3000/api/verify-domain
-  }
+    email magnus@froste.eu
+    on_demand_tls {
+        ask http://portal:3000/api/verify-domain
+    }
 }
 
-# ClawStack admin portal
-{$BASE_DOMAIN} {
-  reverse_proxy portal:3000
+:80 {
+    reverse_proxy portal:3000
 }
 
-# Paperclip orchestrator
-{$PAPERCLIP_DOMAIN} {
-  reverse_proxy paperclip:3100
+:443 {
+    tls {
+        on_demand
+    }
+    reverse_proxy portal:3000
 }
 
-# Customer OpenClaw instances — on-demand TLS, portal routes traffic
-https:// {
-  tls {
-    on_demand
-  }
-  reverse_proxy portal:3000
+clawstack.froste.eu {
+    reverse_proxy portal:3000
 }
 
-http:// {
-  reverse_proxy portal:3000
+boss.froste.eu {
+    reverse_proxy paperclip:3100
 }
