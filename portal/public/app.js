@@ -1111,6 +1111,7 @@ async function mgrOpenTerminal() {
 
   const { term, fitAddon, ws } = result;
   mgrPtyTerm = term; mgrPtyWs = ws;
+  mgrPtyRo = wireTerminal(term, fitAddon, ws, containerEl);
   status.textContent = '';
 }
 
